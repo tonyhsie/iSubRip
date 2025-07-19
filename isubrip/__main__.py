@@ -22,7 +22,6 @@ from isubrip.logger import logger, setup_loggers
 from isubrip.scrapers.scraper import Scraper, ScraperFactory
 from isubrip.subtitle_formats.webvtt import WebVTTCaptionBlock
 from isubrip.utils import (
-    TempDirGenerator,
     convert_log_level,
     format_config_validation_error,
     get_model_field,
@@ -63,7 +62,6 @@ def main() -> None:
             logger.debug(f"Requests count for '{scraper.name}' scraper: {scraper.requests_count}")
             scraper.close()
         
-        TempDirGenerator.cleanup()
 
 
 async def _main() -> None:
