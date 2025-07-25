@@ -125,7 +125,7 @@ class AppleTVScraper(HLSScraper):
         if additional_params:
             request_params.update(additional_params)
 
-        response = await self._async_session.get(url=f"{self._api_base_url}{endpoint}", params=request_params)
+        response = await self._client.get(url=f"{self._api_base_url}{endpoint}", params=request_params)
 
         try:
             raise_for_status(response)
@@ -159,7 +159,7 @@ class AppleTVScraper(HLSScraper):
                          f"'{storefront_cached_params}'.")
             return storefront_cached_params.copy()
 
-        configuration_data = self._get_configuration_data(storefront_id=storefront_id)
+        configuration_data = await self._get_configuration_data(storefront_id=storefront_id)
         request_params: dict[str, str] = configuration_data["applicationProps"]["requiredParamsMap"]["Default"]
         default_locale: str = configuration_data["applicationProps"]["storefront"]["defaultLocale"]
         available_locales: list[str] = configuration_data["applicationProps"]["storefront"]["localesSupported"]
@@ -181,7 +181,7 @@ class AppleTVScraper(HLSScraper):
 
         return request_params
 
-    def _get_configuration_data(self, storefront_id: str) -> dict:
+    async def _get_configuration_data(self, storefront_id: str) -> dict:
         """
         Get configuration data for the given storefront ID.
 
@@ -197,7 +197,7 @@ class AppleTVScraper(HLSScraper):
         params = self._api_base_params.copy()
         params["sf"] = storefront_id
 
-        response = self._session.get(url=url, params=params)
+        response = await self._client.get(url=url, params=params)
         raise_for_status(response)
         logger.debug("Configuration data fetched successfully.")
 

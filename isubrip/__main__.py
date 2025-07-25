@@ -59,9 +59,7 @@ def main() -> None:
             handle_log_rotation(rotation_size=log_rotation_size)
 
         for scraper in ScraperFactory.get_initialized_scrapers():
-            logger.debug(f"Requests count for '{scraper.name}' scraper: {scraper.requests_count}")
-            scraper.close()
-        
+            logger.debug(f"Requests count for '{scraper.name}' scraper: {scraper.requests_count}")        
 
 
 async def _main() -> None:

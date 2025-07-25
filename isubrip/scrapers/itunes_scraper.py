@@ -65,7 +65,7 @@ class ItunesScraper(HLSScraper):
 
         retries = 0
         while True:
-            response = await self._async_session.get(url=appletv_redirect_finding_url, follow_redirects=False)
+            response = await self._client.get(url=appletv_redirect_finding_url, follow_redirects=False)
             if response.status_code != 301 and retries < REDIRECT_MAX_RETRIES:
                 retries += 1
                 logger.debug(f"AppleTV redirect URL not found (Response code: {response.status_code}),"

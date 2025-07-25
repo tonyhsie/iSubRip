@@ -194,13 +194,7 @@ class Scraper(ABC, metaclass=SingletonMeta):
             "proxy": self._proxy,
             "timeout": float(self._timeout),
         }
-        self._session = httpx.Client(
-            **clients_params,
-            event_hooks={
-                "request": [self._increment_requests_counter],
-            },
-        )
-        self._async_session = httpx.AsyncClient(
+        self._client = httpx.AsyncClient(
             **clients_params,
             event_hooks={
                 "request": [self._async_increment_requests_counter],
@@ -208,8 +202,7 @@ class Scraper(ABC, metaclass=SingletonMeta):
         )
 
         # Update session settings according to configurations
-        self._session.headers.update({"User-Agent": self._user_agent})
-        self._async_session.headers.update({"User-Agent": self._user_agent})
+        self._client.headers.update({"User-Agent": self._user_agent})
 
     def _increment_requests_counter(self, request: httpx.Request) -> None:  # noqa: ARG002
         self._requests_counter += 1
@@ -259,18 +252,8 @@ class Scraper(ABC, metaclass=SingletonMeta):
 
         return None
 
-    def __enter__(self) -> Scraper:
-        return self
-
-    def __exit__(self, exc_type: type[BaseException] | None,
-                 exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
-        self.close()
-
     async def async_close(self) -> None:
-        await self._async_session.aclose()
-
-    def close(self) -> None:
-        self._session.close()
+        await self._client.aclose()
 
     @abstractmethod
     async def get_data(self, url: str) -> ScrapedMediaResponse:
@@ -457,13 +440,13 @@ class HLSScraper(Scraper, ABC):
         name: str | None = media_data.name
         return name
 
-    async def load_playlist(self, url: str | list[str], headers: dict | None = None) -> m3u8.M3U8 | None:
-        _headers = headers or self._session.headers
+    async def load_playlist(self, url: str | list[str], headers: dict[str, str] | None = None) -> m3u8.M3U8 | None:
+        _headers = headers or self._client.headers
         result: m3u8.M3U8 | None = None
 
         for url_item in single_string_to_list(item=url):
             try:
-                response = await self._async_session.get(url=url_item, headers=_headers, timeout=5)
+                response = await self._client.get(url=url_item, headers=_headers, timeout=5)
 
             except Exception as e:
                 logger.debug(f"Failed to load M3U8 playlist '{url_item}': {e}")
@@ -547,7 +530,7 @@ class HLSScraper(Scraper, ABC):
     async def download_segments(self, playlist: m3u8.M3U8) -> list[bytes]:
         responses = await asyncio.gather(
             *[
-                self._async_session.get(url=segment.absolute_uri)
+                self._client.get(url=segment.absolute_uri)
                 for segment in playlist.segments
             ],
         )
