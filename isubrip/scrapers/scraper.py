@@ -34,7 +34,6 @@ from isubrip.utils import (
 )
 
 if TYPE_CHECKING:
-    from types import TracebackType
 
     from isubrip.subtitle_formats.subtitles import Subtitles
 

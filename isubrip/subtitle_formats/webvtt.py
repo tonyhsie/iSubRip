@@ -13,6 +13,7 @@ from isubrip.utils import split_subtitles_timestamp
 if TYPE_CHECKING:
     from datetime import time
 
+
 # WebVTT Documentation:
 # https://www.w3.org/TR/webvtt1/#cues
 # https://developer.mozilla.org/en-US/docs/Web/API/WebVTT_API#webvtt_cues

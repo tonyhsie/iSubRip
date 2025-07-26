@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from wcwidth import wcswidth
 
-from isubrip.constants import temp_folder_path, TITLE_REPLACEMENT_STRINGS, WINDOWS_RESERVED_FILE_NAMES
+from isubrip.constants import TITLE_REPLACEMENT_STRINGS, WINDOWS_RESERVED_FILE_NAMES, temp_folder_path
 from isubrip.data_structures import (
     Episode,
     MediaBase,

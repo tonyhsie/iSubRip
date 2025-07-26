@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from isubrip.data_structures import SubtitlesFormatType
     from isubrip.subtitle_formats.subrip import SubRipCaptionBlock, SubRipSubtitles
 
+
 RTL_CONTROL_CHARS = ('\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e')
 RTL_CHAR = '\u202b'
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime as dt
 from functools import lru_cache
 import logging
-from pathlib import Path
 import re
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -16,7 +15,10 @@ from isubrip.constants import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from rich.console import Console
+
 
 BBCOE_REGEX = re.compile(
     r"(?i)(?P<opening_tag>\[(?P<tag_name>[a-z#@][^[]*?)])(?P<content>.*)(?P<closing_tag>\[/(?P=tag_name)])")

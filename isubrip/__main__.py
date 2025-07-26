@@ -12,10 +12,10 @@ from isubrip.cli import console
 from isubrip.commands.download import download
 from isubrip.config import Config
 from isubrip.constants import (
-    data_folder_path,
-    log_files_path,
     PACKAGE_NAME,
     PACKAGE_VERSION,
+    data_folder_path,
+    log_files_path,
     user_config_file_path,
 )
 from isubrip.logger import logger, setup_loggers
@@ -36,6 +36,7 @@ else:
 
 if TYPE_CHECKING:
     from pathlib import Path
+
 
 log_rotation_size: int = 15  # Default size, before being updated by the config file.
 
