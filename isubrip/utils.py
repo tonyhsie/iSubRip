@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from wcwidth import wcswidth
 
-from isubrip.constants import TEMP_FOLDER_PATH, TITLE_REPLACEMENT_STRINGS, WINDOWS_RESERVED_FILE_NAMES
+from isubrip.constants import temp_folder_path, TITLE_REPLACEMENT_STRINGS, WINDOWS_RESERVED_FILE_NAMES
 from isubrip.data_structures import (
     Episode,
     MediaBase,
@@ -59,7 +59,7 @@ class TemporaryDirectory:
     """
     def __init__(self, directory_name: str | None = None):
         self.directory_name = directory_name or secrets.token_hex(5)
-        self.path = TEMP_FOLDER_PATH / self.directory_name
+        self.path = temp_folder_path() / self.directory_name
 
     def __enter__(self) -> Path:
         """Create the temporary directory and return its path."""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import datetime as dt
+from functools import lru_cache
 from pathlib import Path
 from tempfile import gettempdir
 
@@ -8,19 +8,25 @@ from tempfile import gettempdir
 PACKAGE_NAME = "isubrip"
 PACKAGE_VERSION = "2.6.5"
 
-# Paths
-DATA_FOLDER_PATH = Path.home() / f".{PACKAGE_NAME}"
 SCRAPER_MODULES_SUFFIX = "_scraper"
-TEMP_FOLDER_PATH = Path(gettempdir()) / PACKAGE_NAME
-
-# Config Paths
 USER_CONFIG_FILE_NAME = "config.toml"
-USER_CONFIG_FILE_PATH = DATA_FOLDER_PATH / USER_CONFIG_FILE_NAME
+
+@lru_cache(maxsize=1)
+def data_folder_path() -> Path:
+    return Path.home() / f".{PACKAGE_NAME}"
+
+@lru_cache(maxsize=1)
+def temp_folder_path() -> Path:
+    return Path(gettempdir()) / PACKAGE_NAME
+
+@lru_cache(maxsize=1)
+def user_config_file_path() -> Path:
+    return data_folder_path() / USER_CONFIG_FILE_NAME
 
 # Logging Paths
-LOG_FILES_PATH = DATA_FOLDER_PATH / "logs"
-LOG_FILE_NAME = f"{PACKAGE_NAME}_{dt.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-
+@lru_cache(maxsize=1)
+def log_files_path() -> Path:
+    return data_folder_path() / "logs"
 
 # Other
 TITLE_REPLACEMENT_STRINGS = {  # Replacements will be done by the order of the keys.

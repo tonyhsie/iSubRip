@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 from functools import lru_cache
 import logging
+from pathlib import Path
 import re
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -10,8 +12,6 @@ from rich.logging import RichHandler
 
 from isubrip.cli import console
 from isubrip.constants import (
-    LOG_FILE_NAME,
-    LOG_FILES_PATH,
     PACKAGE_NAME,
 )
 
@@ -166,8 +166,8 @@ class CustomLogFileFormatter(logging.Formatter):
 
 
 def setup_loggers(stdout_output: bool = True, stdout_console: Optional[Console] = None,
-                  stdout_loglevel: int = logging.INFO, logfile_output: bool = True,
-                  logfile_loglevel: int = logging.DEBUG) -> None:
+                  stdout_loglevel: int = logging.INFO, logfile_output: bool = False,
+                  logfile_output_path: Optional[Path] = None, logfile_loglevel: int = logging.DEBUG) -> None:
     """
     Configure loggers for both stdout and file output.
 
@@ -178,6 +178,8 @@ def setup_loggers(stdout_output: bool = True, stdout_console: Optional[Console] 
         stdout_loglevel (int, optional): Log level for STDOUT logger. Relevant only if `stdout_output` is True.
             Defaults to logging.INFO.
         logfile_output (bool, optional): Whether to output logs to a logfile. Defaults to True.
+        logfile_output_path (Path | None, optional): Path to the directory where log files will be saved.
+            Required only if `logfile_output` is True. Defaults to None.
         logfile_loglevel (int, optional): Log level for logfile logger. Relevant only if `logfile_output` is True.
             Defaults to logging.DEBUG.
     """
@@ -194,11 +196,15 @@ def setup_loggers(stdout_output: bool = True, stdout_console: Optional[Console] 
         logger.addHandler(stdout_handler)
 
     if logfile_output:
-        if not LOG_FILES_PATH.is_dir():
-            logger.debug("Logs directory could not be found and will be created.")
-            LOG_FILES_PATH.mkdir()
+        if not logfile_output_path:
+            raise ValueError("Missing required 'logfile_output_path' argument (required when 'logfile_output' is True.")
 
-        logfile_path = LOG_FILES_PATH / LOG_FILE_NAME
+        if not logfile_output_path.is_dir():
+            logger.debug("Logs directory could not be found and will be created.")
+            logfile_output_path.mkdir()
+
+        logfile_path = logfile_output_path / f"{PACKAGE_NAME}_{dt.datetime.now().strftime(r'%Y-%m-%d_%H-%M-%S')}.log"
+
         logfile_handler = logging.FileHandler(filename=logfile_path, encoding="utf-8")
         logfile_handler.setLevel(logfile_loglevel)
         logfile_handler.setFormatter(CustomLogFileFormatter())

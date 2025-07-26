@@ -12,11 +12,11 @@ from isubrip.cli import console
 from isubrip.commands.download import download
 from isubrip.config import Config
 from isubrip.constants import (
-    DATA_FOLDER_PATH,
-    LOG_FILES_PATH,
+    data_folder_path,
+    log_files_path,
     PACKAGE_NAME,
     PACKAGE_VERSION,
-    USER_CONFIG_FILE_PATH,
+    user_config_file_path,
 )
 from isubrip.logger import logger, setup_loggers
 from isubrip.scrapers.scraper import Scraper, ScraperFactory
@@ -69,12 +69,12 @@ async def _main() -> None:
         exit(0)
 
     # Generate the data folder if it doesn't previously exist
-    if not DATA_FOLDER_PATH.is_dir():
-        DATA_FOLDER_PATH.mkdir(parents=True)
+    if not data_folder_path().is_dir():
+        data_folder_path().mkdir(parents=True)
 
     # If config file exists, parse it. Otherwise, create a config with default values
-    if USER_CONFIG_FILE_PATH.is_file():
-        config = parse_config(config_file_location=USER_CONFIG_FILE_PATH)
+    if user_config_file_path().is_file():
+        config = parse_config(config_file_location=user_config_file_path())
 
     else:
         config = Config()
@@ -83,6 +83,7 @@ async def _main() -> None:
         stdout_loglevel=convert_log_level(log_level=config.general.log_level),
         stdout_console=console,
         logfile_output=True,
+        logfile_output_path=log_files_path(),
         logfile_loglevel=logging.DEBUG,
     )
 
@@ -162,7 +163,7 @@ def handle_log_rotation(rotation_size: int) -> None:
     Args:
         rotation_size (int): Maximum amount of log files to keep.
     """
-    sorted_log_files = sorted(LOG_FILES_PATH.glob("*.log"), key=lambda file: file.stat().st_mtime, reverse=True)
+    sorted_log_files = sorted(log_files_path().glob("*.log"), key=lambda file: file.stat().st_mtime, reverse=True)
 
     if len(sorted_log_files) > rotation_size:
         for log_file in sorted_log_files[rotation_size:]:
