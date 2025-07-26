@@ -103,11 +103,6 @@ If you find this project helpful, please consider supporting it by:
 - 🌟 Starring the repository
 - 💖 [Sponsoring the project](https://github.com/sponsors/MichaelYochpaz)
 
-## ❤️ Special Thanks
-Thanks to **JetBrains** for generously providing a free open-source [PyCharm](https://www.jetbrains.com/pycharm/) license to help work on this project, through their [Open Source Support Program](https://www.jetbrains.com/community/opensource/).
-
-[![PyCharm Logo](https://resources.jetbrains.com/storage/products/company/brand/logos/PyCharm_icon.svg)](https://www.jetbrains.com/community/opensource/#support)
-
 ## 📝 End User License Agreement
 By using iSubRip, you agree to the following terms:
 
