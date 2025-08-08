@@ -58,6 +58,7 @@ build-backend = "hatchling.build"
 [tool.uv]
 dev-dependencies = [
     "mypy>=1.14.1",
+    "pyperf>=2.9.0",
     "ruff>=0.9.3",
 ]
 
@@ -68,9 +69,8 @@ explicit_package_bases = true
 ignore_missing_imports = true
 python_version = "3.9"
 warn_return_any = true
-plugins = [
-    "pydantic.mypy"
-]
+exclude = ["tests/mock_data"]
+plugins = ["pydantic.mypy"]
 
 [tool.ruff]
 line-length = 120
