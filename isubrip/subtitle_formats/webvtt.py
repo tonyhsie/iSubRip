@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 # https://www.w3.org/TR/webvtt1/#cues
 # https://developer.mozilla.org/en-US/docs/Web/API/WebVTT_API#webvtt_cues
 
+bottom_line_alignment_regex = re.compile(r"line:0+(?:\.0+)?%")
+
 
 class WebVTTBlock(SubtitlesBlock, metaclass=ABCMeta):
     """
@@ -53,8 +55,8 @@ class WebVTTCaptionBlock(SubtitlesCaptionBlock, WebVTTBlock):
         return copy
 
     def to_srt(self) -> SubRipCaptionBlock:
-        # Add a {\an8} tag at the start of the payload if it has 'line:0.00%' in the settings
-        if "line:0.00%" in self.settings and self.subrip_alignment_conversion:
+        # Add a {\an8} tag at the start of the payload if the `line` setting is set to 0%
+        if self.subrip_alignment_conversion and WEBVTT_BOTTOM_LINE_ALIGNMENT_REGEX.search(self.settings):
             # If the payload starts with an RTL control char, add the tag after it
             if self.payload.startswith(RTL_CHAR):
                 payload = RTL_CHAR + WEBVTT_ALIGN_TOP_TAG + self.payload[len(RTL_CHAR):]
@@ -329,5 +331,6 @@ WEBVTT_CAPTION_SETTINGS_REGEX = ("(?:"
 
 WEBVTT_CAPTION_BLOCK_REGEX = re.compile(rf"^({WEBVTT_CAPTION_TIMINGS_REGEX})[ \t]*({WEBVTT_CAPTION_SETTINGS_REGEX})?")
 WEBVTT_COMMENT_HEADER_REGEX = re.compile(rf"^{WebVTTCommentBlock.header}(?:$|[ \t])(.+)?")
+WEBVTT_BOTTOM_LINE_ALIGNMENT_REGEX = re.compile(r"line:0+(?:\.0+)?%")
 
-WEBVTT_ALIGN_TOP_TAG = "{\\an8}"
+WEBVTT_ALIGN_TOP_TAG = r"{\an8}"
