@@ -1,4 +1,11 @@
 # Changelog
+## 2.6.6 [2025-08-13]
+### Changes:
+* Updated the date format in logs for unreleased content that has a release date. ([Issue #91](https://github.com/MichaelYochpaz/iSubRip/issues/91))
+
+### Bug Fixes:
+* Fixed an issue where in some cases, when converting from WebVTT to SubRip with the `subrip-alignment-conversion` setting enabled, top-aligned captions were not detected correctly. ([Issue #90](https://github.com/MichaelYochpaz/iSubRip/issues/90))
+---
 ## 2.6.5 [2025-06-20]
 ### Changes:
 * Added missing languages to the list of RTL languages (relevant if the `languages.fix-rtl` config setting is enabled).
