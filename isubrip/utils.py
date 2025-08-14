@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     import httpx
     from pydantic import BaseModel, ValidationError
 
+import os
+
 
 class SingletonMeta(ABCMeta):
     """
@@ -126,7 +128,7 @@ def convert_log_level(log_level: str) -> int:
 
 
 def download_subtitles_to_file(media_data: Movie | Episode, subtitles_data: SubtitlesData, output_path: str | PathLike,
-                               source_abbreviation: str | None = None, overwrite: bool = False) -> Path:
+                               source_abbreviation: str | None = None, overwrite: bool = False, file_datetime: float | None = None) -> Path:
     """
     Download subtitles to a file.
 
@@ -174,6 +176,8 @@ def download_subtitles_to_file(media_data: Movie | Episode, subtitles_data: Subt
 
     with file_path.open('wb') as f:
         f.write(subtitles_data.content)
+        if file_datetime is not None:
+            os.utime(file_path, (file_datetime, file_datetime))
 
     return file_path
 
