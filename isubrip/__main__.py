@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+from dataclasses import dataclass
 import logging
+import os
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx2
 from pydantic import ValidationError
@@ -26,6 +29,7 @@ from isubrip.utils import (
     format_config_validation_error,
     get_model_field,
     raise_for_status,
+    redact_url_query_param,
     single_string_to_list,
 )
 
@@ -35,50 +39,58 @@ else:
     import tomli as tomllib
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
 log_rotation_size: int = 15  # Default size, before being updated by the config file.
 
 
+@dataclass(frozen=True)
+class CLIArguments:
+    """Validated command-line arguments."""
+
+    urls: list[str]
+    dsid: str | None
+
+
 def main() -> None:
     """A wrapper for the actual main function that handles exceptions and cleanup."""
+    exit_code = 1
+
     try:
-        asyncio.run(_main())
+        exit_code = 0 if asyncio.run(_main()) else 1
 
     except Exception as ex:
         logger.error(f"Error: {ex}")
         logger.debug("Debug information:", exc_info=True)
-        exit(1)
-    
+
     except KeyboardInterrupt:
         logger.debug("Keyboard interrupt detected, exiting...")
-        exit(0)
+        exit_code = 0
 
     finally:
         if log_rotation_size > 0:
             handle_log_rotation(rotation_size=log_rotation_size)
 
         for scraper in ScraperFactory.get_initialized_scrapers():
-            logger.debug(f"Requests count for '{scraper.name}' scraper: {scraper.requests_count}")        
+            logger.debug(f"Requests count for '{scraper.name}' scraper: {scraper.requests_count}")
+
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
-async def _main() -> None:
-    # Assure at least one argument was passed
-    if len(sys.argv) < 2:
-        logger.info(f"Usage: {PACKAGE_NAME} <iTunes movie URL> [iTunes movie URL...]")
-        exit(0)
+async def _main() -> bool:
+    cli_args = parse_cli_args()
+
+    config = parse_config(
+        config_file_location=user_config_file_path() if user_config_file_path().is_file() else None,
+        dsid_override=cli_args.dsid,
+    )
 
     # Generate the data folder if it doesn't previously exist
     if not data_folder_path().is_dir():
         data_folder_path().mkdir(parents=True)
-
-    # If config file exists, parse it. Otherwise, create a config with default values
-    if user_config_file_path().is_file():
-        config = parse_config(config_file_location=user_config_file_path())
-
-    else:
-        config = Config()
 
     setup_loggers(
         stdout_loglevel=convert_log_level(log_level=config.general.log_level),
@@ -88,8 +100,7 @@ async def _main() -> None:
         logfile_loglevel=logging.DEBUG,
     )
 
-    cli_args = " ".join(sys.argv[1:])
-    logger.debug(f"CLI Command: {PACKAGE_NAME} {cli_args}")
+    logger.debug(f"CLI Command: {format_cli_command_for_logging(cli_args=cli_args)}")
     logger.debug(f"Python version: {sys.version}")
     logger.debug(f"Package version: {PACKAGE_VERSION}")
     logger.debug(f"OS: {sys.platform}")
@@ -100,8 +111,8 @@ async def _main() -> None:
         check_for_updates(current_package_version=PACKAGE_VERSION)
 
     try:
-        await download(
-            *single_string_to_list(item=sys.argv[1:]),
+        download_succeeded = await download(
+            *single_string_to_list(item=cli_args.urls),
             download_path=config.downloads.folder,
             language_filter=config.downloads.languages,
             convert_to_srt=config.subtitles.convert_to_srt,
@@ -121,6 +132,48 @@ async def _main() -> None:
             except Exception as e:
                 logger.warning(f"Error during async cleanup: {e}")
                 logger.debug("Cleanup debug info:", exc_info=True)
+
+    if not download_succeeded:
+        logger.error("All requested URLs failed.")
+
+    return download_succeeded
+
+
+def parse_cli_args(args: Sequence[str] | None = None) -> CLIArguments:
+    """Parse and validate command-line arguments."""
+    parser = argparse.ArgumentParser(
+        prog=PACKAGE_NAME,
+        description="Download subtitles from Apple TV or iTunes movie URLs.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {PACKAGE_VERSION}",
+    )
+    parser.add_argument(
+        "--dsid",
+        metavar="DSID",
+        help="Apple account DSID to use for this run.",
+    )
+    parser.add_argument(
+        "urls",
+        metavar="URL",
+        nargs="+",
+        help="Apple TV or iTunes movie URL to process.",
+    )
+    parsed_args = parser.parse_args(args)
+    return CLIArguments(urls=parsed_args.urls, dsid=parsed_args.dsid)
+
+
+def format_cli_command_for_logging(cli_args: CLIArguments) -> str:
+    """Format CLI arguments for logs without exposing the DSID."""
+    command_parts = [PACKAGE_NAME]
+
+    if cli_args.dsid is not None:
+        command_parts.extend(("--dsid", "REDACTED"))
+
+    command_parts.extend(redact_url_query_param(url=url, key="dsid") for url in cli_args.urls)
+    return " ".join(command_parts)
 
 
 def check_for_updates(current_package_version: str) -> None:
@@ -171,41 +224,108 @@ def handle_log_rotation(rotation_size: int) -> None:
             log_file.unlink()
 
 
-def parse_config(config_file_location: Path) -> Config:
+def parse_config(config_file_location: Path | None, dsid_override: str | None = None) -> Config:
     """
     Parse the configuration file and return a Config instance.
     Exit the program (with code 1) if an error occurs while parsing the configuration file.
 
     Args:
-        config_file_location (Path): The location of the configuration file.
+        config_file_location (Path | None): The location of the configuration file, if one exists.
+        dsid_override (str | None): A command-line DSID that takes precedence over all other sources.
 
     Returns:
         Config: An instance of the Config.
     """
     try:
-        with config_file_location.open('rb') as file:
-            config_data = tomllib.load(file)
-
-        return Config.model_validate(config_data)
+        return load_config(config_file_location=config_file_location, dsid_override=dsid_override)
 
     except ValidationError as e:
-        logger.error("Invalid configuration - the following errors were found in the configuration file:\n" +
-                     format_config_validation_error(exc=e) +
-                     "\nPlease update your configuration to resolve this issue.")
-        logger.debug("Debug information:", exc_info=True)
-        exit(1)
+        config_source = format_validation_error_source(
+            exc=e,
+            config_file_location=config_file_location,
+            dsid_override=dsid_override,
+        )
+        logger.error(
+            f"Invalid {config_source}:\n"
+            f"{format_config_validation_error(exc=e)}"
+            "Update the settings above and try again.",
+        )
+        logger.debug(f"Configuration validation exception type: {type(e).__name__}")
+        raise SystemExit(1) from e
 
 
     except tomllib.TOMLDecodeError as e:
         logger.error(f"Error parsing config file: {e}")
         logger.debug("Debug information:", exc_info=True)
-        exit(1)
+        raise SystemExit(1) from e
 
 
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
         logger.debug("Debug information:", exc_info=True)
-        exit(1)
+        raise SystemExit(1) from e
+
+
+def load_config(config_file_location: Path | None, dsid_override: str | None = None) -> Config:
+    """Load configuration and apply DSID sources in CLI, environment, then TOML precedence order."""
+    config_data: dict[str, Any] = {}
+
+    if config_file_location is not None:
+        with config_file_location.open("rb") as file:
+            config_data = tomllib.load(file)
+
+    effective_dsid, _ = resolve_dsid_override(dsid_override=dsid_override)
+
+    if effective_dsid is not None:
+        scrapers_config = config_data.setdefault("scrapers", {})
+
+        if not isinstance(scrapers_config, dict):
+            raise TypeError("The 'scrapers' configuration value must be a TOML table.")
+
+        appletv_config = scrapers_config.setdefault("appletv", {})
+
+        if not isinstance(appletv_config, dict):
+            raise TypeError("The 'scrapers.appletv' configuration value must be a TOML table.")
+
+        appletv_config["dsid"] = effective_dsid
+
+    return Config.model_validate(config_data)
+
+
+def resolve_dsid_override(dsid_override: str | None) -> tuple[str | None, str | None]:
+    """Resolve the DSID override value and its user-facing source name."""
+    cli_dsid = dsid_override if dsid_override and dsid_override.strip() else None
+
+    if cli_dsid is not None:
+        return cli_dsid, "the --dsid option"
+
+    environment_dsid = os.getenv("ISUBRIP_DSID")
+    environment_dsid = environment_dsid if environment_dsid and environment_dsid.strip() else None
+
+    if environment_dsid is not None:
+        return environment_dsid, "the ISUBRIP_DSID environment variable"
+
+    return None, None
+
+
+def format_validation_error_source(
+    exc: ValidationError,
+    config_file_location: Path | None,
+    dsid_override: str | None,
+) -> str:
+    """Describe the source responsible for a configuration validation error."""
+    dsid_error = any(tuple(error["loc"])[-3:] == ("scrapers", "appletv", "dsid") for error in exc.errors())
+
+    if dsid_error:
+        _, dsid_source = resolve_dsid_override(dsid_override=dsid_override)
+
+        if dsid_source is not None:
+            return f"DSID from {dsid_source}"
+
+    if config_file_location is not None:
+        return f"configuration file '{config_file_location}'"
+
+    return "configuration"
 
 
 def update_settings(config: Config) -> None:

@@ -10,7 +10,7 @@ import secrets
 import shutil
 import sys
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
-from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from urllib.parse import quote_plus, unquote_plus, urlsplit, urlunsplit
 
 from wcwidth import wcswidth
 
@@ -130,6 +130,29 @@ def convert_log_level(log_level: str) -> int:
     return cast("int", getattr(logging, log_level_upper))
 
 
+def add_or_replace_url_query_param(url: str, key: str, value: str) -> str:
+    """
+    Add a query parameter to a URL, replacing existing parameters with the same key.
+
+    Args:
+        url (str): URL to update.
+        key (str): Query parameter key to add or replace.
+        value (str): Query parameter value to set.
+
+    Returns:
+        str: URL with the updated query parameter.
+    """
+    url_parts = urlsplit(url)
+    query_parts = [
+        query_part
+        for query_part in url_parts.query.split("&")
+        if query_part and unquote_plus(query_part.partition("=")[0]).casefold() != key.casefold()
+    ]
+    query_parts.append(f"{quote_plus(key)}={quote_plus(value)}")
+
+    return urlunsplit(url_parts._replace(query="&".join(query_parts)))
+
+
 def redact_url_query_param(url: str, key: str) -> str:
     """
     Redact a query parameter value in a URL.
@@ -215,17 +238,16 @@ def format_config_validation_error(exc: ValidationError) -> str:
         exc (ValidationError): The ValidationError instance containing validation errors.
 
     Returns:
-        str: A formatted string describing the validation errors, including the location,
-             type, value, and error messages for each invalid field.
+        str: A formatted string describing the location and error messages for each invalid field.
+
+    Input values are deliberately omitted because scraper configuration may contain credentials.
     """
     validation_errors = exc.errors()
     error_str = ""
 
-    consolidated_errors: dict[str, dict[str, Any]] = {}
+    consolidated_errors: dict[str, list[str]] = {}
 
     for validation_error in validation_errors:
-        value: Any = validation_error['input']
-        value_type: str = type(value).__name__
         location: list[str] = [str(item) for item in validation_error['loc']]
         error_msg: str = validation_error['msg']
 
@@ -244,23 +266,14 @@ def format_config_validation_error(exc: ValidationError) -> str:
             location_str = location[0]
 
         if location_str in consolidated_errors:
-            consolidated_errors[location_str]['errors'].append(error_msg)
+            consolidated_errors[location_str].append(error_msg)
 
         else:
-            consolidated_errors[location_str] = {}
-            consolidated_errors[location_str]['info'] = {
-                "value": value,
-                "type": value_type,
-            }
-            consolidated_errors[location_str]['errors'] = [error_msg]
+            consolidated_errors[location_str] = [error_msg]
 
-    for error_loc, error_data in consolidated_errors.items():
-        error_type = error_data['info']['type']
-        error_value = error_data['info']['value']
-        error_str += f"'{error_loc}' (type: '{error_type}', value: '{error_value}'):\n"
-        
-        for error in error_data['errors']:
-            error_str += f"    {error}\n"
+    for error_loc, errors in consolidated_errors.items():
+        for error in errors:
+            error_str += f"  - {error_loc}: {error}\n"
 
     return error_str
 
@@ -602,24 +615,15 @@ def raise_for_status(response: httpx2.Response) -> None:
     Args:
         response (httpx2.Response): A response object.
     """
-    truncation_threshold = 1500
-
     if not response.is_error:
         return
-
-    if len(response.text) > truncation_threshold:
-        # Truncate the response as in some cases there could be an unexpected long HTML response
-        response_text = response.text[:truncation_threshold].rstrip() + " <TRUNCATED...>"
-
-    else:
-        response_text = response.text
 
     logger.debug(f"Response status code: {response.status_code}")
 
     if response.headers.get('Content-Type'):
         logger.debug(f"Response type: {response.headers['Content-Type']}")
 
-    logger.debug(f"Response text: {response_text}")
+    logger.debug(f"Response body omitted from logs ({len(response.content)} bytes).")
 
     response.raise_for_status()
 

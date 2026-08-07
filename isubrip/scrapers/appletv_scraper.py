@@ -7,12 +7,26 @@ import re
 from typing import Any
 
 from httpx2 import HTTPError
+from pydantic import Field, field_validator
+from pydantic_core import PydanticCustomError
 
 from isubrip.data_structures import Episode, Movie, ScrapedMediaResponse, Season, Series
 from isubrip.logger import logger
 from isubrip.scrapers.scraper import HLSScraper, ScraperError
 from isubrip.subtitle_formats.webvtt import WebVTTSubtitles
-from isubrip.utils import convert_epoch_to_datetime, parse_url_params, raise_for_status
+from isubrip.utils import (
+    add_or_replace_url_query_param,
+    convert_epoch_to_datetime,
+    get_model_field,
+    parse_url_params,
+    raise_for_status,
+)
+
+MISSING_DSID_ERROR_MESSAGE = (
+    "Apple DSID authentication is required to access this paid Apple TV / iTunes title. Set the numeric DSID for "
+    "the Apple account that owns the movie or has an active rental using the '--dsid' command-line option, the "
+    "'ISUBRIP_DSID' environment variable, or the 'scrapers.appletv.dsid' setting in config.toml."
+)
 
 
 class AppleTVScraper(HLSScraper):
@@ -52,6 +66,46 @@ class AppleTVScraper(HLSScraper):
         "v": "84",
         "pfm": "web",
     }
+
+    class ScraperConfig(HLSScraper.ScraperConfig):
+        dsid: str | None = Field(
+            default=None,
+            description="Apple ID DSID for accessing owned/rented Apple TV/iTunes content.",
+        )
+
+        @field_validator("dsid", mode="before")
+        @classmethod
+        def validate_dsid(cls, value: Any) -> str | None:
+            if value is None:
+                return None
+
+            if isinstance(value, bool):
+                raise PydanticCustomError(
+                    "invalid_dsid",
+                    "Apple DSID must be provided as digits only (for example, 1234567890).",
+                )
+
+            if isinstance(value, int):
+                value = str(value)
+
+            if not isinstance(value, str):
+                raise PydanticCustomError(
+                    "invalid_dsid",
+                    "Apple DSID must be provided as digits only (for example, 1234567890).",
+                )
+
+            value_str: str = value.strip()
+
+            if not value_str:
+                return None
+
+            if not value_str.isascii() or not value_str.isdigit():
+                raise PydanticCustomError(
+                    "invalid_dsid",
+                    "Apple DSID must contain ASCII digits only (for example, 1234567890).",
+                )
+
+            return value_str
 
     class Channel(Enum):
         """
@@ -259,10 +313,23 @@ class AppleTVScraper(HLSScraper):
 
         movie_playlists = []
         movie_duration = None
+        dsid = get_model_field(model=self.config, field="dsid")
+        offers = playable_data["itunesMediaApiData"].get("offers")
 
-        if offers := playable_data["itunesMediaApiData"].get("offers"):
+        if (
+            playable_data.get("isEntitledToPlay") is False
+            and not isinstance(dsid, str)
+            and isinstance(offers, list)
+            and any(isinstance(offer, dict) and offer.get("hlsUrl") for offer in offers)
+        ):
+            raise ScraperError(MISSING_DSID_ERROR_MESSAGE)
+
+        if offers:
             for offer in offers:
-                if (playlist := offer.get("hlsUrl")) and offer["hlsUrl"] not in movie_playlists:
+                if (playlist := offer.get("hlsUrl")) and isinstance(dsid, str):
+                    playlist = add_or_replace_url_query_param(url=playlist, key="dsid", value=dsid)
+
+                if playlist and playlist not in movie_playlists:
                     movie_playlists.append(playlist)
 
             if movie_duration_int := offers[0].get("durationInMilliseconds"):

@@ -19,7 +19,7 @@ from isubrip.data_structures import (
     SubtitlesDownloadResults,
 )
 from isubrip.logger import logger
-from isubrip.scrapers.scraper import PlaylistLoadError, Scraper, ScraperError, ScraperFactory, SubtitlesDownloadError
+from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, ScraperError, ScraperFactory, SubtitlesDownloadError
 from isubrip.ui import MinsAndSecsTimeElapsedColumn
 from isubrip.utils import (
     TemporaryDirectory,
@@ -28,6 +28,7 @@ from isubrip.utils import (
     format_media_description,
     format_release_name,
     generate_non_conflicting_path,
+    redact_url_query_param,
 )
 
 
@@ -36,7 +37,7 @@ async def download(*urls: str,
                    language_filter: list[str] | None = None,
                    convert_to_srt: bool = False,
                    overwrite_existing: bool = True,
-                   zip: bool = False) -> None:
+                   zip: bool = False) -> bool:
     """
     Download subtitles from given URLs.
 
@@ -49,59 +50,78 @@ async def download(*urls: str,
         overwrite_existing (bool, optional): Whether to overwrite existing subtitles. Defaults to True.
         zip (bool, optional): Whether to zip multiple subtitles. Defaults to False.
     """
+    any_url_succeeded = False
+
     for url in urls:
+        url_succeeded = False
+        safe_url = redact_url_query_param(url=url, key="dsid")
+
         try:
-            logger.info(f"Scraping [blue]{url}[/blue]")
+            logger.info(f"Scraping [blue]{safe_url}[/blue]")
 
             scraper = ScraperFactory.get_scraper_instance(url=url)
 
             try:
-                logger.debug(f"Fetching {url}")
+                logger.debug(f"Fetching {safe_url}")
                 scraper_response: ScrapedMediaResponse = await scraper.get_data(url=url)
 
             except ScraperError as e:
-                logger.error(f"Error: {e}")
-                logger.debug("Debug information:", exc_info=True)
+                safe_error = redact_url_query_param(url=str(e), key="dsid")
+                logger.error(f"Error: {safe_error}")
+                logger.debug(f"Exception type: {type(e).__name__}")
                 continue
 
             media_data = scraper_response.media_data
             playlist_scraper = ScraperFactory.get_scraper_instance(scraper_id=scraper_response.playlist_scraper)
 
+            if not isinstance(playlist_scraper, HLSScraper):
+                logger.error(f"Error: '{scraper_response.playlist_scraper}' is not an HLS playlist scraper.")
+                continue
+
             if not media_data:
-                logger.error(f"Error: No supported media was found for {url}.")
+                logger.error(f"Error: No supported media was found for {safe_url}.")
                 continue
 
             for media_item in media_data:
                 try:
                     logger.info(f"Found {media_item.media_type}: "
                                 f"[cyan]{format_media_description(media_data=media_item)}[/cyan]")
-                    await download_media(scraper=playlist_scraper,
-                                        media_item=media_item,
-                                        download_path=download_path,
-                                        language_filter=language_filter,
-                                        convert_to_srt=convert_to_srt,
-                                        overwrite_existing=overwrite_existing,
-                                        zip=zip)
+                    media_item_succeeded = await download_media(
+                        scraper=playlist_scraper,
+                        media_item=media_item,
+                        download_path=download_path,
+                        language_filter=language_filter,
+                        convert_to_srt=convert_to_srt,
+                        overwrite_existing=overwrite_existing,
+                        zip=zip,
+                    )
+                    url_succeeded = media_item_succeeded or url_succeeded
 
                 except Exception as e:
                     if len(media_data) > 1:
+                        safe_error = redact_url_query_param(url=str(e), key="dsid")
                         logger.warning(f"Error scraping media item "
-                                    f"'{format_media_description(media_data=media_item)}': {e}\n"
+                                    f"'{format_media_description(media_data=media_item)}': {safe_error}\n"
                                     f"Skipping to next media item...")
-                        logger.debug("Debug information:", exc_info=True)
+                        logger.debug(f"Exception type: {type(e).__name__}")
                         continue
 
                     raise
 
         except Exception as e:
-            logger.error(f"Error while scraping '{url}': {e}")
-            logger.debug("Debug information:", exc_info=True)
-            continue
+            safe_error = redact_url_query_param(url=str(e), key="dsid")
+            logger.error(f"Error while scraping '{safe_url}': {safe_error}")
+            logger.debug(f"Exception type: {type(e).__name__}")
+
+        finally:
+            any_url_succeeded = url_succeeded or any_url_succeeded
+
+    return any_url_succeeded
 
 
-async def download_media(scraper: Scraper, media_item: MediaData, download_path: Path,
+async def download_media(scraper: HLSScraper, media_item: MediaData, download_path: Path,
                               language_filter: list[str] | None = None, convert_to_srt: bool = False,
-                              overwrite_existing: bool = True, zip: bool = False) -> None:
+                              overwrite_existing: bool = True, zip: bool = False) -> bool:
     """
     Download a media item.
 
@@ -116,27 +136,37 @@ async def download_media(scraper: Scraper, media_item: MediaData, download_path:
         zip (bool, optional): Whether to zip multiple subtitles. Defaults to False.
     """
     if isinstance(media_item, Series):
-        for season in media_item.seasons:
-            await download_media(media_item=season, scraper=scraper, download_path=download_path,
-                                 language_filter=language_filter, convert_to_srt=convert_to_srt,
-                                 overwrite_existing=overwrite_existing, zip=zip)
+        results: list[bool] = []
 
-    elif isinstance(media_item, Season):
+        for season in media_item.seasons:
+            results.append(await download_media(media_item=season, scraper=scraper, download_path=download_path,
+                                                language_filter=language_filter, convert_to_srt=convert_to_srt,
+                                                overwrite_existing=overwrite_existing, zip=zip))
+
+        return any(results)
+
+    if isinstance(media_item, Season):
+        results = []
+
         for episode in media_item.episodes:
             logger.info(f"{format_media_description(media_data=episode, shortened=True)}:")
-            await download_media_item(media_item=episode, scraper=scraper, download_path=download_path,
-                                 language_filter=language_filter, convert_to_srt=convert_to_srt,
-                                 overwrite_existing=overwrite_existing, zip=zip)
+            results.append(await download_media_item(media_item=episode, scraper=scraper, download_path=download_path,
+                                                     language_filter=language_filter, convert_to_srt=convert_to_srt,
+                                                     overwrite_existing=overwrite_existing, zip=zip))
 
-    elif isinstance(media_item, (Movie | Episode)):
-        await download_media_item(media_item=media_item, scraper=scraper, download_path=download_path,
-                                 language_filter=language_filter, convert_to_srt=convert_to_srt,
-                                 overwrite_existing=overwrite_existing, zip=zip)
+        return any(results)
+
+    if isinstance(media_item, (Movie | Episode)):
+        return await download_media_item(media_item=media_item, scraper=scraper, download_path=download_path,
+                                         language_filter=language_filter, convert_to_srt=convert_to_srt,
+                                         overwrite_existing=overwrite_existing, zip=zip)
+
+    return False
 
 
-async def download_media_item(scraper: Scraper, media_item: Movie | Episode, download_path: Path,
+async def download_media_item(scraper: HLSScraper, media_item: Movie | Episode, download_path: Path,
                               language_filter: list[str] | None = None, convert_to_srt: bool = False,
-                              overwrite_existing: bool = True, zip: bool = False) -> None:
+                              overwrite_existing: bool = True, zip: bool = False) -> bool:
     """
     Download subtitles for a single media item.
 
@@ -173,7 +203,7 @@ async def download_media_item(scraper: Scraper, media_item: Movie | Episode, dow
             else:
                 logger.info("No matching subtitles were found.")
 
-            return  # noqa: TRY300
+            return success_count > 0  # noqa: TRY300
 
         except PlaylistLoadError as e:
             ex = e
@@ -190,8 +220,10 @@ async def download_media_item(scraper: Scraper, media_item: Movie | Episode, dow
         else:
             logger.error("Error: No valid playlist was found.")
 
+    return False
 
-async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, download_path: Path,
+
+async def download_subtitles(scraper: HLSScraper, media_data: Movie | Episode, download_path: Path,
                              language_filter: list[str] | None = None, convert_to_srt: bool = False,
                              overwrite_existing: bool = True, zip: bool = False) -> SubtitlesDownloadResults:
     """
@@ -227,10 +259,7 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
         if not media_data.playlist:
             raise PlaylistLoadError("No playlist was found for provided media data.")
 
-        main_playlist = await scraper.load_playlist(url=media_data.playlist)  # type: ignore[func-returns-value]
-
-        if not main_playlist:
-            raise PlaylistLoadError("Failed to load the main playlist.")
+        main_playlist = await scraper.load_playlist(url=media_data.playlist)
 
         matching_subtitle_groups = scraper.find_matching_subtitle_groups(
             main_playlist=main_playlist,

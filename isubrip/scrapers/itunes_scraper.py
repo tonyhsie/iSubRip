@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from isubrip.logger import logger
-from isubrip.scrapers.scraper import HLSScraper, ScraperError, ScraperFactory
+from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, ScraperError, ScraperFactory
 from isubrip.subtitle_formats.webvtt import WebVTTSubtitles
+from isubrip.utils import redact_url_query_param
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
@@ -41,6 +42,10 @@ APPLE_SUBTITLE_RENDITION_ATTRIBUTES = (
     "channels",
     "stable_rendition_id",
 )
+APPLE_MANIFEST_HOSTS = {
+    "play.itunes.apple.com",
+    "play-edge.itunes.apple.com",
+}
 
 
 class ItunesScraper(HLSScraper):
@@ -143,12 +148,52 @@ class ItunesScraper(HLSScraper):
         if redirect_location.startswith('//'):
             redirect_location = "https:" + redirect_location
 
-        logger.debug(f"Redirect URL: {redirect_location}")
+        logger.debug(f"Redirect URL: {redact_url_query_param(url=redirect_location, key='dsid')}")
 
         if not self._appletv_scraper.match_url(redirect_location):
             raise ScraperError("Redirect URL is not a valid AppleTV URL.")
 
         return await self._appletv_scraper.get_data(url=redirect_location)
+
+    async def load_playlist(self, url: str | list[str], headers: dict[str, str] | None = None) -> m3u8.M3U8:
+        try:
+            return await super().load_playlist(url=url, headers=headers)
+
+        except PlaylistLoadError as e:
+            if e.status_code == 404 and self._is_apple_manifest_url(url=e.url):
+                if self._url_has_dsid(url=e.url):
+                    raise PlaylistLoadError(
+                        "Apple denied access to movie's subtitle manifest (HTTP 404). Verify that the "
+                        "configured DSID belongs to the Apple account that owns the movie or has an active rental.",
+                        status_code=e.status_code,
+                        url=e.url,
+                    ) from e
+
+                raise PlaylistLoadError(
+                    "Apple denied access to movie's subtitle manifest (HTTP 404) because no DSID was included. "
+                    "Set the numeric DSID for the Apple account that owns the movie or has an active rental using "
+                    "the '--dsid' command-line option, the 'ISUBRIP_DSID' environment variable, or the "
+                    "'scrapers.appletv.dsid' setting in config.toml",
+                    status_code=e.status_code,
+                    url=e.url,
+                ) from e
+
+            raise
+
+    @staticmethod
+    def _is_apple_manifest_url(url: str | None) -> bool:
+        if not url:
+            return False
+
+        url_parts = urlsplit(url)
+        return url_parts.hostname in APPLE_MANIFEST_HOSTS and url_parts.path.endswith("/playlist.m3u8")
+
+    @staticmethod
+    def _url_has_dsid(url: str | None) -> bool:
+        if not url:
+            return False
+
+        return any(key.casefold() == "dsid" for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True))
 
     @staticmethod
     def parse_language_name(media_data: Media) -> str | None:
