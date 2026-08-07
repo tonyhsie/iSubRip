@@ -32,13 +32,13 @@ classifiers = [
 ]
 requires-python = ">= 3.10"
 dependencies = [
-    "httpx[http2]>=0.28.1",
+    "httpx2>=2.9.1",
     "m3u8>=6.0.0",
     "pydantic>=2.12.0",
     "pydantic-settings>=2.11.0",
     "pygments>=2.19.1",  # Used by 'rich'. Specified here as version 2.18 appears to cause issues.
     "rich>=14.2.0",
-    "tomli>=2.3.0",
+    "tomli>=2.4.1; python_version < '3.11'",
     "wcwidth>=0.2.14",
 ]
 
@@ -55,8 +55,8 @@ isubrip = "isubrip.__main__:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "mypy>=1.14.1",
     "pyperf>=2.9.0",
     "pytest>=8.4.2",

@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 
 class MockLoader:
@@ -45,8 +45,8 @@ class MockLoader:
 
         self.logger.info(f"Loaded {len(self._manifest)} mock data entries from {len(manifest_paths)} manifests.")
 
-    async def mock_send_handler(self, request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:  # noqa: ARG002
-        """An async handler to be used as a side_effect for a patched httpx.AsyncClient.send."""
+    async def mock_send_handler(self, request: httpx2.Request, *args: Any, **kwargs: Any) -> httpx2.Response:  # noqa: ARG002
+        """An async handler to be used as a side_effect for a patched httpx2.AsyncClient.send."""
         url_str = str(request.url)
 
         if url_str not in self._manifest:
@@ -55,7 +55,7 @@ class MockLoader:
         response_path = self._manifest[url_str]
         response_content = response_path.read_bytes()
 
-        return httpx.Response(
+        return httpx2.Response(
             status_code=200,
             content=response_content,
             request=request,

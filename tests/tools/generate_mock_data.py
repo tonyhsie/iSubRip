@@ -17,7 +17,7 @@ from isubrip.logger import logger, setup_loggers
 from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, Scraper, ScraperFactory
 
 if TYPE_CHECKING:
-    import httpx
+    import httpx2
     import m3u8
 
     from isubrip.scrapers.appletv_scraper import AppleTVScraper
@@ -90,7 +90,7 @@ class MockDataGenerator(ABC):
         manifest: dict[str, str] = {}
 
         # Define a hook to save responses
-        async def save_response_hook(response: httpx.Response) -> None:
+        async def save_response_hook(response: httpx2.Response) -> None:
             await response.aread()
             url = str(response.request.url)
 

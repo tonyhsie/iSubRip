@@ -10,7 +10,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
-import httpx
+import httpx2
 import m3u8
 from pydantic import AliasGenerator, BaseModel, ConfigDict, Field, create_model
 
@@ -117,8 +117,8 @@ class Scraper(ABC, metaclass=SingletonMeta):
             This assures that the config data for the other scrapers is passed as well.
         config (ScraperConfig | None): [Class Attribute] A ScraperConfig instance for the scraper,
             containing configurations.
-        _session (httpx.Client): A synchronous HTTP client session.
-        _async_session (httpx.AsyncClient): An asynchronous HTTP client session.
+        _session (httpx2.Client): A synchronous HTTP client session.
+        _async_session (httpx2.AsyncClient): An asynchronous HTTP client session.
 
     Notes:
         Each scraper implements its own `ScraperConfig` class (which can be overridden and updated),
@@ -131,7 +131,7 @@ class Scraper(ABC, metaclass=SingletonMeta):
            and additional settings."""
     
     default_timeout: ClassVar[int | float] = 10
-    default_user_agent: ClassVar[str] = httpx._client.USER_AGENT  # noqa: SLF001
+    default_user_agent: ClassVar[str] = DefaultScraperConfig().user_agent
     default_proxy: ClassVar[str | None] = None
     default_verify_ssl: ClassVar[bool] = True
     subtitles_fix_rtl: ClassVar[bool] = False
@@ -193,7 +193,7 @@ class Scraper(ABC, metaclass=SingletonMeta):
             "proxy": self._proxy,
             "timeout": float(self._timeout),
         }
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             **clients_params,
             event_hooks={
                 "request": [self._async_increment_requests_counter],
@@ -203,10 +203,10 @@ class Scraper(ABC, metaclass=SingletonMeta):
         # Update session settings according to configurations
         self._client.headers.update({"User-Agent": self._user_agent})
 
-    def _increment_requests_counter(self, request: httpx.Request) -> None:  # noqa: ARG002
+    def _increment_requests_counter(self, request: httpx2.Request) -> None:  # noqa: ARG002
         self._requests_counter += 1
 
-    async def _async_increment_requests_counter(self, request: httpx.Request) -> None:  # noqa: ARG002
+    async def _async_increment_requests_counter(self, request: httpx2.Request) -> None:  # noqa: ARG002
         self._requests_counter += 1
 
     @property
@@ -403,9 +403,13 @@ class HLSScraper(Scraper, ABC):
 
 
     class ScraperConfig(Scraper.ScraperConfig):
-        playlist_filters: HLSScraper.PlaylistFiltersSubcategory = Field(  # type: ignore[valid-type]
-            default_factory=lambda: HLSScraper.PlaylistFiltersSubcategory(),
-        )
+        if TYPE_CHECKING:
+            playlist_filters: ScraperConfigSubcategory = Field(default_factory=ScraperConfigSubcategory)
+
+        else:
+            playlist_filters: HLSScraper.PlaylistFiltersSubcategory = Field(
+                default_factory=lambda: HLSScraper.PlaylistFiltersSubcategory(),
+            )
 
 
     def __init__(self, playlist_filters: dict[str, str | list[str] | None] | None = None,
@@ -441,7 +445,7 @@ class HLSScraper(Scraper, ABC):
         result: m3u8.M3U8 | None = None
 
         urls = single_string_to_list(item=url)
-        response: httpx.Response | None = None
+        response: httpx2.Response | None = None
 
         for idx, url_item in enumerate(urls):
             try:

@@ -6,7 +6,7 @@ import fnmatch
 import re
 from typing import Any
 
-from httpx import HTTPError
+from httpx2 import HTTPError
 
 from isubrip.data_structures import Episode, Movie, ScrapedMediaResponse, Season, Series
 from isubrip.logger import logger

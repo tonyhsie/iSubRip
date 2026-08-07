@@ -23,7 +23,7 @@ async def benchmark() -> None:
     with TemporaryDirectory() as temp_dir:
         logger.info(f"Temporary directory created at: {temp_dir}")
 
-        with patch("httpx.AsyncClient.send", side_effect=mock_loader.mock_send_handler):
+        with patch("httpx2.AsyncClient.send", side_effect=mock_loader.mock_send_handler):
             await download(url, download_path=temp_dir)
 
 

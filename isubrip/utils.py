@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from os import PathLike
     from types import TracebackType
 
-    import httpx
+    import httpx2
     from pydantic import BaseModel, ValidationError
 
 
@@ -568,13 +568,13 @@ def merge_dict_values(*dictionaries: dict) -> dict:
     return result
 
 
-def raise_for_status(response: httpx.Response) -> None:
+def raise_for_status(response: httpx2.Response) -> None:
     """
     Raise an exception if the response status code is invalid.
     Uses 'response.raise_for_status()' internally, with additional logging.
 
     Args:
-        response (httpx.Response): A response object.
+        response (httpx2.Response): A response object.
     """
     truncation_threshold = 1500
 

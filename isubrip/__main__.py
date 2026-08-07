@@ -5,7 +5,7 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 from pydantic import ValidationError
 
 from isubrip.cli import console
@@ -133,7 +133,7 @@ def check_for_updates(current_package_version: str) -> None:
     api_url = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
     logger.debug("Checking for package updates on PyPI...")
     try:
-        response = httpx.get(
+        response = httpx2.get(
             url=api_url,
             headers={"Accept": "application/json"},
             timeout=5,
