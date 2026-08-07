@@ -7,6 +7,23 @@ from typing import Any
 
 import httpx2
 
+from isubrip.utils import redact_url_query_param
+
+
+def normalize_mock_url(url: str) -> str:
+    """Normalize request URLs before they are written to or read from fixture manifests."""
+    return redact_url_query_param(url=url, key="dsid")
+
+
+def redact_sensitive_content(content: bytes, sensitive_values: list[str]) -> bytes:
+    """Redact configured account identifiers before persisting HTTP fixtures."""
+    redacted_content = content
+
+    for sensitive_value in sensitive_values:
+        redacted_content = redacted_content.replace(sensitive_value.encode("utf-8"), b"REDACTED")
+
+    return redacted_content
+
 
 class MockLoader:
     """
@@ -30,7 +47,7 @@ class MockLoader:
                 manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
     
                 for url, filename in manifest_data.items():
-                    self._manifest[url] = manifest_path.parent / filename
+                    self._manifest[normalize_mock_url(url=url)] = manifest_path.parent / filename
 
                 self.logger.info(f"Manifest {manifest_path} loaded successfully.")
 
@@ -47,7 +64,7 @@ class MockLoader:
 
     async def mock_send_handler(self, request: httpx2.Request, *args: Any, **kwargs: Any) -> httpx2.Response:  # noqa: ARG002
         """An async handler to be used as a side_effect for a patched httpx2.AsyncClient.send."""
-        url_str = str(request.url)
+        url_str = normalize_mock_url(url=str(request.url))
 
         if url_str not in self._manifest:
             raise KeyError(f"Mock data not found for URL: {url_str}")

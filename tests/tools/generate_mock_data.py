@@ -12,14 +12,17 @@ import shutil
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from isubrip.__main__ import parse_config, update_settings
 from isubrip.cli import console
+from isubrip.constants import user_config_file_path
 from isubrip.logger import logger, setup_loggers
+from isubrip.scrapers.appletv_scraper import AppleTVScraper  # noqa: TC001
 from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, Scraper, ScraperFactory
+from isubrip.utils import get_model_field
+from tests.tools.mock_loader import normalize_mock_url, redact_sensitive_content
 
 if TYPE_CHECKING:
     import httpx2
-
-    from isubrip.scrapers.appletv_scraper import AppleTVScraper
 
 
 setup_loggers(
@@ -52,6 +55,8 @@ class MockDataGenerator(ABC):
 
     def __init__(self, scraper: Scraper):
         self.scraper = scraper
+        configured_dsid = get_model_field(model=scraper.config, field="dsid")
+        self._sensitive_values = [configured_dsid] if isinstance(configured_dsid, str) else []
 
     @abstractmethod
     def output_path(self, url: str) -> Path:
@@ -76,6 +81,7 @@ class MockDataGenerator(ABC):
         """
         output_dir = self.MOCK_DATA_ROOT / self.output_path(url)
         manifest_path = output_dir / "manifest.json"
+        safe_input_url = normalize_mock_url(url=url)
 
         if output_dir.is_dir() and manifest_path.is_file():
             if force:
@@ -91,17 +97,17 @@ class MockDataGenerator(ABC):
         # Define a hook to save responses
         async def save_response_hook(response: httpx2.Response) -> None:
             await response.aread()
-            url = str(response.request.url)
+            safe_url = normalize_mock_url(url=str(response.request.url))
 
-            if url in manifest:
-                logger.debug(f"URL already processed, skipping: {url}")
+            if safe_url in manifest:
+                logger.debug(f"URL already processed, skipping: {safe_url}")
                 return
 
-            logger.info(f"Intercepted response from: {url}")
-            filename = hashlib.sha256(url.encode('utf-8')).hexdigest()
+            logger.info(f"Intercepted response from: {safe_url}")
+            filename = hashlib.sha256(safe_url.encode('utf-8')).hexdigest()
             file_path = output_dir / filename
-            file_path.write_bytes(response.content)
-            manifest[url] = filename
+            file_path.write_bytes(redact_sensitive_content(response.content, sensitive_values=self._sensitive_values))
+            manifest[safe_url] = filename
             logger.debug(f"Saved response to: {file_path}")
 
         try:
@@ -112,22 +118,23 @@ class MockDataGenerator(ABC):
             scraped_data = await self.scraper.get_data(url=url)
 
             if not scraped_data or not scraped_data.media_data:
-                logger.error(f"Could not retrieve media data for {url}")
+                logger.error(f"Could not retrieve media data for {safe_input_url}")
                 return
 
             media_item = scraped_data.media_data[0]
             playlist_url = getattr(media_item, 'playlist', None)
 
             if not playlist_url:
-                logger.error(f"No playlist URL found in scraped data for {url}")
+                logger.error(f"No playlist URL found in scraped data for {safe_input_url}")
                 return
 
             main_playlist_url = playlist_url[0] if isinstance(playlist_url, list) else playlist_url
-            logger.info(f"Loading main playlist from: {main_playlist_url}")
+            safe_main_playlist_url = normalize_mock_url(url=main_playlist_url)
+            logger.info(f"Loading main playlist from: {safe_main_playlist_url}")
             main_playlist = await self.scraper.load_playlist(url=main_playlist_url)
 
             if not main_playlist:
-                logger.error(f"Could not load main playlist from {main_playlist_url}")
+                logger.error(f"Could not load main playlist from {safe_main_playlist_url}")
                 return
 
             logger.info(f"Searching for subtitle playlists (Languages: {languages or 'all'})...")
@@ -142,8 +149,10 @@ class MockDataGenerator(ABC):
 
             for media_group in subtitle_media_groups:
                 for sub_media in media_group.candidates:
+                    safe_subtitle_url = normalize_mock_url(url=sub_media.absolute_uri)
+
                     try:
-                        logger.info(f"Loading subtitle playlist: {sub_media.absolute_uri}")
+                        logger.info(f"Loading subtitle playlist: {safe_subtitle_url}")
                         subtitle_playlist = await self.scraper.load_playlist(
                             url=sub_media.absolute_uri,
                         )
@@ -153,15 +162,15 @@ class MockDataGenerator(ABC):
                                 await self.scraper.download_segments(subtitle_playlist)
 
                     except PlaylistLoadError as e:
-                        logger.error(f"Failed to load subtitle playlist {sub_media.absolute_uri}: {e}")
-                    except Exception:
-                        logger.error(
-                            f"Unexpected error processing playlist {sub_media.absolute_uri}",
-                            exc_info=True,
-                        )
+                        safe_error = normalize_mock_url(url=str(e))
+                        logger.error(f"Failed to load subtitle playlist {safe_subtitle_url}: {safe_error}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error processing playlist {safe_subtitle_url}: {type(e).__name__}")
 
         except Exception as e:
-            logger.error(f"An error occurred during data generation: {e}", exc_info=True)
+            safe_error = normalize_mock_url(url=str(e))
+            logger.error(f"An error occurred during data generation: {safe_error}")
+            logger.debug(f"Exception type: {type(e).__name__}")
 
         finally:
             if manifest:
@@ -205,7 +214,22 @@ async def main() -> None:
         action="store_true",
         help="Force regeneration of mock data, deleting any existing data.",
     )
+    parser.add_argument(
+        "--dsid",
+        metavar="DSID",
+        help=(
+            "Apple account DSID to use for this run. Prefer ISUBRIP_DSID or config.toml to avoid exposing it "
+            "in shell history and process listings."
+        ),
+    )
     args = parser.parse_args()
+
+    config_path = user_config_file_path()
+    config = parse_config(
+        config_file_location=config_path if config_path.is_file() else None,
+        dsid_override=args.dsid,
+    )
+    update_settings(config=config)
 
     scraper = ScraperFactory.get_scraper_instance(url=args.url, raise_error=True)
 
@@ -215,7 +239,7 @@ async def main() -> None:
     if generator_class := MOCK_GENERATOR_MAPPING.get(scraper.id):
         generator = generator_class(scraper=scraper)
 
-        logger.info(f"Starting mock data generation for URL: {args.url}")
+        logger.info(f"Starting mock data generation for URL: {normalize_mock_url(url=args.url)}")
         await generator.generate(url=args.url, languages=args.languages, force=args.force)
         logger.info("Mock data generation process complete.")
 
