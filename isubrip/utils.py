@@ -10,6 +10,7 @@ import secrets
 import shutil
 import sys
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from wcwidth import wcswidth
 
@@ -127,6 +128,31 @@ def convert_log_level(log_level: str) -> int:
         raise ValueError(f"Invalid log level: {log_level}")
 
     return cast("int", getattr(logging, log_level_upper))
+
+
+def redact_url_query_param(url: str, key: str) -> str:
+    """
+    Redact a query parameter value in a URL.
+
+    Args:
+        url (str): URL to redact.
+        key (str): Query parameter key to redact.
+
+    Returns:
+        str: URL with matching query parameter values redacted.
+    """
+    url_parts = urlsplit(url)
+    query_parts = []
+
+    for query_part in url_parts.query.split("&"):
+        encoded_key, separator, _ = query_part.partition("=")
+
+        if unquote_plus(encoded_key).casefold() == key.casefold():
+            query_parts.append(f"{encoded_key}{separator}REDACTED" if separator else f"{encoded_key}=REDACTED")
+        else:
+            query_parts.append(query_part)
+
+    return urlunsplit(url_parts._replace(query="&".join(query_parts)))
 
 
 def download_subtitles_to_file(media_data: Movie | Episode, subtitles_data: SubtitlesData, output_path: str | PathLike,

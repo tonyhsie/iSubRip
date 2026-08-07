@@ -232,11 +232,13 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
         if not main_playlist:
             raise PlaylistLoadError("Failed to load the main playlist.")
 
-        matching_subtitles = scraper.find_matching_subtitles(main_playlist=main_playlist,  # type: ignore[var-annotated]
-                                                             language_filter=language_filter)
+        matching_subtitle_groups = scraper.find_matching_subtitle_groups(
+            main_playlist=main_playlist,
+            language_filter=language_filter,
+        )
 
         # If no matching subtitles were found, there's no need to continue
-        if not matching_subtitles:
+        if not matching_subtitle_groups:
             return SubtitlesDownloadResults(
                 media_data=media_data,
                 successful_subtitles=successful_downloads,
@@ -244,10 +246,15 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
                 is_zip=zip,
             )
 
-        logger.info(f"{len(matching_subtitles)} matching subtitles were found.", extra={"hide_when_interactive": True})
+        logger.info(
+            f"{len(matching_subtitle_groups)} matching subtitles were found.",
+            extra={"hide_when_interactive": True},
+        )
         downloaded_subtitles: list[str] = []
 
-        progress_log = Text(f"Downloaded subtitles ({len(downloaded_subtitles)}/{len(matching_subtitles)}):")
+        progress_log = Text(
+            f"Downloaded subtitles ({len(downloaded_subtitles)}/{len(matching_subtitle_groups)}):",
+        )
         downloads_list = Text()
         progress_bar = Progress(
             SpinnerColumn(),
@@ -258,12 +265,13 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
             MinsAndSecsTimeElapsedColumn(),
             console=console,
         )
-        task = progress_bar.add_task("Starting download", total=len(matching_subtitles))
+        task = progress_bar.add_task("Starting download", total=len(matching_subtitle_groups))
 
         with conditional_live(
             Group(progress_log, downloads_list, Text(), progress_bar),  # Empty 'Text' for line spacing
         ) as live:
-            for matching_subtitles_item in matching_subtitles:
+            for matching_subtitle_group in matching_subtitle_groups:
+                matching_subtitles_item = matching_subtitle_group.primary
                 language_info = scraper.format_subtitles_description(
                     subtitles_media=matching_subtitles_item,
                 )
@@ -272,8 +280,10 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
                     progress_bar.update(task, advance=1, description=f"Processing [magenta]{language_info}[/magenta]")
 
                 try:
-                    subtitles_data = await scraper.download_subtitles(media_data=matching_subtitles_item,
-                                                                      subrip_conversion=convert_to_srt)
+                    subtitles_data = await scraper.download_subtitle_group(
+                        media_group=matching_subtitle_group,
+                        subrip_conversion=convert_to_srt,
+                    )
 
                 except Exception as e:
                     if isinstance(e, SubtitlesDownloadError):
@@ -300,7 +310,7 @@ async def download_subtitles(scraper: Scraper, media_data: Movie | Episode, down
 
                     if live:
                         progress_log.plain = (f"Downloaded subtitles "
-                                             f"({len(downloaded_subtitles)}/{len(matching_subtitles)}):")
+                                             f"({len(downloaded_subtitles)}/{len(matching_subtitle_groups)}):")
                         downloads_list.plain = f"{format_list(downloaded_subtitles, width=live.console.width)}"
 
                     logger.info(f"{language_info} subtitles were successfully downloaded.",

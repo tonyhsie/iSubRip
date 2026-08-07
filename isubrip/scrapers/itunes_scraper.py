@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from isubrip.logger import logger
 from isubrip.scrapers.scraper import HLSScraper, ScraperError, ScraperFactory
 from isubrip.subtitle_formats.webvtt import WebVTTSubtitles
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
+
+    import m3u8
     from m3u8.model import Media
 
     from isubrip.data_structures import Movie, ScrapedMediaResponse
@@ -16,6 +20,28 @@ if TYPE_CHECKING:
 
 REDIRECT_MAX_RETRIES = 5
 REDIRECT_SLEEP_TIME = 2
+APPLE_SUBTITLE_CDN_HOST_REGEX = re.compile(
+    r"vod-(?:ap|fa|ak)-(?P<family>amt|aoc)\.tv\.apple\.com",
+    flags=re.IGNORECASE,
+)
+APPLE_SUBTITLE_GROUP_ID_REGEX = re.compile(
+    r"subtitles_(?:(?:ap|fa|ak)|vod-(?:ap|fa|ak)-(?P<family>amt|aoc)\.tv\.apple\.com)",
+    flags=re.IGNORECASE,
+)
+APPLE_SUBTITLE_RENDITION_ATTRIBUTES = (
+    "type",
+    "language",
+    "name",
+    "default",
+    "autoselect",
+    "forced",
+    "assoc_language",
+    "instream_id",
+    "characteristics",
+    "channels",
+    "stable_rendition_id",
+)
+
 
 class ItunesScraper(HLSScraper):
     """An iTunes movie data scraper."""
@@ -28,7 +54,17 @@ class ItunesScraper(HLSScraper):
     uses_scrapers = ["appletv"]
 
     _subtitles_filters = {
-        HLSScraper.M3U8Attribute.GROUP_ID.value: ["subtitles_ak", "subtitles_vod-ak-amt.tv.apple.com"],
+        HLSScraper.M3U8Attribute.GROUP_ID.value: [
+            "subtitles_ap",
+            "subtitles_fa",
+            "subtitles_ak",
+            "subtitles_vod-ap-amt.tv.apple.com",
+            "subtitles_vod-fa-amt.tv.apple.com",
+            "subtitles_vod-ak-amt.tv.apple.com",
+            "subtitles_vod-ap-aoc.tv.apple.com",
+            "subtitles_vod-fa-aoc.tv.apple.com",
+            "subtitles_vod-ak-aoc.tv.apple.com",
+        ],
         **HLSScraper._subtitles_filters,  # noqa: SLF001
     }
 
@@ -38,6 +74,30 @@ class ItunesScraper(HLSScraper):
             scraper_id="appletv",
             raise_error=True,
         )
+
+    def _get_subtitle_media_group_key(self, subtitles_media: Media) -> Hashable:
+        subtitle_url = subtitles_media.uri
+        group_id_match = APPLE_SUBTITLE_GROUP_ID_REGEX.fullmatch(subtitles_media.group_id or "")
+
+        if not subtitle_url or not group_id_match:
+            return super()._get_subtitle_media_group_key(subtitles_media=subtitles_media)
+
+        url_parts = urlsplit(subtitle_url)
+        host_match = APPLE_SUBTITLE_CDN_HOST_REGEX.fullmatch(url_parts.hostname or "")
+
+        if host_match:
+            cdn_family = host_match.group("family").casefold()
+            canonical_url = url_parts._replace(netloc=f"vod-apple-{cdn_family}.tv.apple.com").geturl()
+
+        else:
+            cdn_family = (group_id_match.group("family") or "generic").casefold()
+            canonical_url = subtitle_url
+
+        rendition_attributes = tuple(
+            getattr(subtitles_media, attribute_name, None)
+            for attribute_name in APPLE_SUBTITLE_RENDITION_ATTRIBUTES
+        )
+        return cdn_family, canonical_url, rendition_attributes
 
     async def get_data(self, url: str) -> ScrapedMediaResponse[Movie]:
         """

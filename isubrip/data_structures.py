@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from dataclasses import dataclass
 import datetime as dt  # noqa: TC003
 from enum import Enum
 from typing import TYPE_CHECKING, Generic, Literal, NamedTuple, TypeVar
@@ -16,6 +17,22 @@ MainPlaylist = TypeVar("MainPlaylist", bound=m3u8.M3U8)
 PlaylistMediaItem = TypeVar("PlaylistMediaItem", bound=m3u8.Media)
 
 MediaData = TypeVar("MediaData", bound="MediaBase")
+
+
+@dataclass(frozen=True)
+class SubtitleMediaGroup(Generic[PlaylistMediaItem]):
+    """A logical subtitle rendition and its ordered download candidates."""
+
+    candidates: tuple[PlaylistMediaItem, ...]
+
+    def __post_init__(self) -> None:
+        if not self.candidates:
+            raise ValueError("A subtitle media group must contain at least one candidate.")
+
+    @property
+    def primary(self) -> PlaylistMediaItem:
+        """Return the preferred candidate, used for rendition metadata and display."""
+        return self.candidates[0]
 
 
 class SubtitlesDownloadResults(NamedTuple):

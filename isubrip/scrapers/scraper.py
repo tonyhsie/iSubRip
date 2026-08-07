@@ -19,6 +19,7 @@ from isubrip.data_structures import (
     MainPlaylist,
     PlaylistMediaItem,
     ScrapedMediaResponse,
+    SubtitleMediaGroup,
     SubtitlesData,
     SubtitlesFormatType,
     SubtitlesType,
@@ -29,11 +30,13 @@ from isubrip.utils import (
     format_subtitles_description,
     get_model_field,
     merge_dict_values,
+    redact_url_query_param,
     return_first_valid,
     single_string_to_list,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Hashable
 
     from isubrip.subtitle_formats.subtitles import Subtitles
 
@@ -313,6 +316,14 @@ class Scraper(ABC, metaclass=SingletonMeta):
         """
 
     @abstractmethod
+    def find_matching_subtitle_groups(
+        self,
+        main_playlist: MainPlaylist,
+        language_filter: list[str] | None = None,
+    ) -> list[SubtitleMediaGroup[PlaylistMediaItem]]:
+        """Find logical subtitle renditions and their ordered download candidates."""
+
+    @abstractmethod
     async def load_playlist(self, url: str | list[str], headers: dict | None = None) -> MainPlaylist | None:
         """
         Load a playlist from a URL to a representing object.
@@ -440,33 +451,83 @@ class HLSScraper(Scraper, ABC):
         name: str | None = media_data.name
         return name
 
-    async def load_playlist(self, url: str | list[str], headers: dict[str, str] | None = None) -> m3u8.M3U8 | None:
+    @staticmethod
+    def _format_playlist_failure_response(response: httpx2.Response) -> str:
+        detail = f"status {response.status_code} ({response.reason_phrase})"
+        return f"{detail} with empty response" if not response.content else detail
+
+    async def load_playlist(self, url: str | list[str], headers: dict[str, str] | None = None) -> m3u8.M3U8:
         _headers = headers or self._client.headers
-        result: m3u8.M3U8 | None = None
 
         urls = single_string_to_list(item=url)
-        response: httpx2.Response | None = None
+        last_error: PlaylistLoadError | None = None
 
         for idx, url_item in enumerate(urls):
+            safe_url = redact_url_query_param(url=url_item, key="dsid")
+
             try:
-                logger.debug(f"Loading M3U8 playlist from {url_item} ({idx + 1} of {len(urls)})")
+                logger.debug(f"Loading M3U8 playlist from {safe_url} ({idx + 1} of {len(urls)})")
                 response = await self._client.get(url=url_item, headers=_headers, timeout=5)
 
-                if not response.text:
-                    logger.debug("Received an empty response for the playlist.")
+                if not response.is_success:
+                    failure_detail = self._format_playlist_failure_response(response=response)
+                    logger.debug(f"Failed to load playlist from {safe_url}: {failure_detail}")
+                    last_error = PlaylistLoadError(
+                        f"Failed to load playlist: {failure_detail}",
+                        status_code=response.status_code,
+                        url=url_item,
+                    )
                     continue
 
             except Exception as e:
-                logger.debug(f"Failed to load playlist: {e}")
+                failure_detail = f"request failed ({type(e).__name__})"
+                logger.debug(f"Failed to load playlist from {safe_url}: {failure_detail}")
+                last_error = PlaylistLoadError(f"Failed to load playlist: {failure_detail}", url=url_item)
                 continue
 
-            if not response:
-                raise PlaylistLoadError("Failed to load playlists from server.")
+            if not response.text:
+                failure_detail = f"status {response.status_code} ({response.reason_phrase}) with empty response"
+                logger.debug(f"Failed to load playlist from {safe_url}: {failure_detail}")
+                last_error = PlaylistLoadError(
+                    f"Failed to load playlist: {failure_detail}",
+                    status_code=response.status_code,
+                    url=url_item,
+                )
+                continue
 
-            result = m3u8.loads(content=response.text, uri=url_item)
-            break
+            normalized_content = response.text.lstrip("\ufeff \t\r\n")
 
-        return result
+            if not normalized_content or normalized_content.splitlines()[0].strip() != "#EXTM3U":
+                failure_detail = f"status {response.status_code} ({response.reason_phrase}) with invalid M3U8 response"
+                logger.debug(f"Failed to load playlist from {safe_url}: {failure_detail}")
+                last_error = PlaylistLoadError(
+                    f"Failed to load playlist: {failure_detail}",
+                    status_code=response.status_code,
+                    url=url_item,
+                )
+                continue
+
+            try:
+                return m3u8.loads(content=response.text, uri=url_item)
+
+            except Exception as e:
+                failure_detail = f"invalid M3U8 playlist ({type(e).__name__})"
+                logger.debug(f"Failed to load playlist from {safe_url}: {failure_detail}")
+                last_error = PlaylistLoadError(
+                    f"Failed to load playlist: {failure_detail}",
+                    status_code=response.status_code,
+                    url=url_item,
+                )
+                continue
+
+        if last_error:
+            raise PlaylistLoadError(
+                f"Failed to load playlist from server. Last failure: {last_error}",
+                status_code=last_error.status_code,
+                url=last_error.url,
+            ) from last_error
+
+        raise PlaylistLoadError("No playlist URL was provided.")
 
     @staticmethod
     def detect_subtitles_type(subtitles_media: m3u8.Media) -> SubtitlesType | None:
@@ -490,9 +551,6 @@ class HLSScraper(Scraper, ABC):
     async def download_subtitles(self, media_data: m3u8.Media, subrip_conversion: bool = False) -> SubtitlesData:
         try:
             playlist_m3u8 = await self.load_playlist(url=media_data.absolute_uri)
-
-            if playlist_m3u8 is None:
-                raise PlaylistLoadError("Could not load subtitles M3U8 playlist.")  # noqa: TRY301
 
             if not media_data.language:
                 raise ValueError("Language code not found in media data.")  # noqa: TRY301
@@ -534,6 +592,35 @@ class HLSScraper(Scraper, ABC):
                 special_type=self.detect_subtitles_type(subtitles_media=media_data),
                 original_exc=e,
             ) from e
+
+    async def download_subtitle_group(
+        self,
+        media_group: SubtitleMediaGroup[m3u8.Media],
+        subrip_conversion: bool = False,
+    ) -> SubtitlesData:
+        """Download a logical subtitle rendition, trying each candidate in order."""
+        last_error: SubtitlesDownloadError | None = None
+
+        for candidate_index, media_data in enumerate(media_group.candidates, start=1):
+            try:
+                return await self.download_subtitles(
+                    media_data=media_data,
+                    subrip_conversion=subrip_conversion,
+                )
+
+            except SubtitlesDownloadError as e:
+                last_error = e
+
+                if candidate_index < len(media_group.candidates):
+                    logger.debug(
+                        f"Subtitle download candidate {candidate_index} of {len(media_group.candidates)} failed; "
+                        "trying the next candidate.",
+                    )
+
+        if last_error is None:
+            raise RuntimeError("Subtitle media group unexpectedly contained no candidates.")
+
+        raise last_error
 
     async def download_segments(self, playlist: m3u8.M3U8) -> list[bytes]:
         responses = await asyncio.gather(
@@ -603,14 +690,44 @@ class HLSScraper(Scraper, ABC):
 
         return results
 
-    def find_matching_subtitles(self, main_playlist: m3u8.M3U8,
-                                language_filter: list[str] | None = None) -> list[m3u8.Media]:
-        _filters = self._subtitles_filters
+    def _get_subtitle_media_group_key(self, subtitles_media: m3u8.Media) -> Hashable:
+        """Return a grouping key for equivalent subtitle candidates."""
+        return id(subtitles_media)
+
+    def find_matching_subtitle_groups(
+        self,
+        main_playlist: m3u8.M3U8,
+        language_filter: list[str] | None = None,
+    ) -> list[SubtitleMediaGroup[m3u8.Media]]:
+        _filters = {
+            key: value.copy() if isinstance(value, list) else value
+            for key, value in self._subtitles_filters.items()
+        }
 
         if language_filter:
             _filters[self.M3U8Attribute.LANGUAGE.value] = language_filter
 
-        return self.find_matching_media(main_playlist=main_playlist, filters=_filters)
+        matching_subtitles = self.find_matching_media(main_playlist=main_playlist, filters=_filters)
+        grouped_subtitles: dict[Hashable, list[m3u8.Media]] = {}
+
+        for subtitles_media in matching_subtitles:
+            group_key = self._get_subtitle_media_group_key(subtitles_media=subtitles_media)
+            grouped_subtitles.setdefault(group_key, []).append(subtitles_media)
+
+        return [
+            SubtitleMediaGroup(candidates=tuple(candidate_group))
+            for candidate_group in grouped_subtitles.values()
+        ]
+
+    def find_matching_subtitles(self, main_playlist: m3u8.M3U8,
+                                language_filter: list[str] | None = None) -> list[m3u8.Media]:
+        return [
+            media_group.primary
+            for media_group in self.find_matching_subtitle_groups(
+                main_playlist=main_playlist,
+                language_filter=language_filter,
+            )
+        ]
     
     @classmethod
     def format_subtitles_description(cls, subtitles_media: m3u8.Media) -> str:
@@ -766,7 +883,8 @@ class ScraperFactory:
                     )
 
         elif url:
-            logger.debug(f"Searching for a scraper object that matches URL '{url}'...")
+            safe_url = redact_url_query_param(url=url, key="dsid")
+            logger.debug(f"Searching for a scraper object that matches URL '{safe_url}'...")
             for scraper in cls.get_scraper_classes():
                 if scraper.match_url(url) is not None:
                     return cls._get_scraper_instance(
@@ -792,7 +910,10 @@ class DownloadError(ScraperError):
 
 
 class PlaylistLoadError(ScraperError):
-    pass
+    def __init__(self, message: str = "", status_code: int | None = None, url: str | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.url = url
 
 
 class SubtitlesDownloadError(ScraperError):

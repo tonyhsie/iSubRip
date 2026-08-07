@@ -18,7 +18,6 @@ from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, Scraper, Scr
 
 if TYPE_CHECKING:
     import httpx2
-    import m3u8
 
     from isubrip.scrapers.appletv_scraper import AppleTVScraper
 
@@ -125,34 +124,41 @@ class MockDataGenerator(ABC):
 
             main_playlist_url = playlist_url[0] if isinstance(playlist_url, list) else playlist_url
             logger.info(f"Loading main playlist from: {main_playlist_url}")
-            main_playlist: m3u8.M3U8 | None = await self.scraper.load_playlist(url=main_playlist_url)
+            main_playlist = await self.scraper.load_playlist(url=main_playlist_url)
 
             if not main_playlist:
                 logger.error(f"Could not load main playlist from {main_playlist_url}")
                 return
 
             logger.info(f"Searching for subtitle playlists (Languages: {languages or 'all'})...")
-            subtitle_media_items: list[m3u8.Media] = self.scraper.find_matching_subtitles(
-                main_playlist, language_filter=languages)
+            subtitle_media_groups = self.scraper.find_matching_subtitle_groups(
+                main_playlist,
+                language_filter=languages,
+            )
 
-            if not subtitle_media_items:
+            if not subtitle_media_groups:
                 logger.warning(f"No matching subtitles found for languages: {languages or 'all'}")
                 return
 
-            for sub_media in subtitle_media_items:
-                try:
-                    logger.info(f"Loading subtitle playlist: {sub_media.absolute_uri}")
-                    subtitle_playlist: m3u8.M3U8 | None = await self.scraper.load_playlist(
-                        url=sub_media.absolute_uri)
-                    if subtitle_playlist and subtitle_playlist.segments:
-                        logger.info(f"Downloading {len(subtitle_playlist.segments)} segments...")
-                        if isinstance(self.scraper, HLSScraper):
-                            await self.scraper.download_segments(subtitle_playlist)
+            for media_group in subtitle_media_groups:
+                for sub_media in media_group.candidates:
+                    try:
+                        logger.info(f"Loading subtitle playlist: {sub_media.absolute_uri}")
+                        subtitle_playlist = await self.scraper.load_playlist(
+                            url=sub_media.absolute_uri,
+                        )
+                        if subtitle_playlist and subtitle_playlist.segments:
+                            logger.info(f"Downloading {len(subtitle_playlist.segments)} segments...")
+                            if isinstance(self.scraper, HLSScraper):
+                                await self.scraper.download_segments(subtitle_playlist)
 
-                except PlaylistLoadError as e:
-                    logger.error(f"Failed to load subtitle playlist {sub_media.absolute_uri}: {e}")
-                except Exception:
-                    logger.error(f"Unexpected error processing playlist {sub_media.absolute_uri}", exc_info=True)
+                    except PlaylistLoadError as e:
+                        logger.error(f"Failed to load subtitle playlist {sub_media.absolute_uri}: {e}")
+                    except Exception:
+                        logger.error(
+                            f"Unexpected error processing playlist {sub_media.absolute_uri}",
+                            exc_info=True,
+                        )
 
         except Exception as e:
             logger.error(f"An error occurred during data generation: {e}", exc_info=True)
