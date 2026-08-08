@@ -1,4 +1,19 @@
 # Changelog
+## 2.7.0 [2026-08-08]
+### Added:
+* Added Apple DSID authentication for Apple TV content owned or rented by the configured account. The DSID can be set with the `--dsid` command-line option, the `ISUBRIP_DSID` environment variable, or the `scrapers.appletv.dsid` config setting. ([Issue #103](https://github.com/MichaelYochpaz/iSubRip/issues/103))
+* Added `--help` and `--version` command-line options.
+
+### Changes:
+* Updated iTunes subtitle playlist filtering to match all known Apple subtitle GROUP-ID patterns across the `ap`, `fa`, and `ak` CDN pathways, treating equivalent renditions as ordered fallbacks instead of duplicate downloads.
+* Migrated the HTTP client from `httpx` to `httpx2`.
+
+### Bug Fixes:
+* Improved HLS playlist handling so missing DSID configuration is reported before paid-content manifest requests, Apple 404 responses produce actionable errors, and invalid success responses fall back to the next playlist URL.
+* Fixed the command exit status so a run where every requested URL fails or no matching subtitles are found returns a non-zero exit code.
+* Restricted distribution archives to release files, preventing unrelated repository and local development files from being included in source distributions.
+
+---
 ## 2.6.8 [2025-10-14]
 ### Changes:
 * Removed Python 3.9 support, added Python 3.14 support.
