@@ -309,7 +309,7 @@ async def download_subtitles(scraper: HLSScraper, media_data: Movie | Episode, d
                     progress_bar.update(task, advance=1, description=f"Processing [magenta]{language_info}[/magenta]")
 
                 try:
-                    subtitles_data = await scraper.download_subtitle_group(
+                    subtitles_data, subtitles_datetime = await scraper.download_subtitle_group(
                         media_group=matching_subtitle_group,
                         subrip_conversion=convert_to_srt,
                     )
@@ -333,6 +333,7 @@ async def download_subtitles(scraper: HLSScraper, media_data: Movie | Episode, d
                         output_path=temp_download_path,
                         source_abbreviation=scraper.abbreviation,
                         overwrite=overwrite_existing,
+                        file_datetime=subtitles_datetime,
                     ))
 
                     downloaded_subtitles.append(f"• {language_info}")
