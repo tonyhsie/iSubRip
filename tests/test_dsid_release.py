@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -9,13 +10,20 @@ import httpx2
 from pydantic import ValidationError
 import pytest
 
-from isubrip.__main__ import format_cli_command_for_logging, load_config, main, parse_cli_args, parse_config
+from isubrip.__main__ import (
+    check_for_updates,
+    format_cli_command_for_logging,
+    load_config,
+    main,
+    parse_cli_args,
+    parse_config,
+)
 from isubrip.commands.download import download, download_media_item
 from isubrip.config import Config
 from isubrip.constants import PACKAGE_NAME, PACKAGE_VERSION
 from isubrip.data_structures import Movie, ScrapedMediaResponse, SubtitlesDownloadResults
 from isubrip.scrapers.appletv_scraper import AppleTVScraper
-from isubrip.scrapers.itunes_scraper import ItunesScraper
+from isubrip.scrapers.itunes_scraper import REDIRECT_SLEEP_TIME, ItunesScraper
 from isubrip.scrapers.scraper import HLSScraper, PlaylistLoadError, ScraperError, ScraperFactory
 from isubrip.subtitle_formats.webvtt import WebVTTSubtitles
 from isubrip.utils import (
@@ -23,6 +31,7 @@ from isubrip.utils import (
     format_config_validation_error,
     raise_for_status,
     redact_url_query_param,
+    remove_url_query_param,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +49,33 @@ class PlaylistTestScraper(HLSScraper):
         raise NotImplementedError
 
 
+@pytest.mark.parametrize(
+    ("published_version", "expect_upgrade_warning"),
+    [
+        ("2.7.0", False),
+        ("2.7.1", False),
+        ("2.8.0", True),
+    ],
+)
+def test_check_for_updates_only_warns_for_a_newer_published_version(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    published_version: str,
+    expect_upgrade_warning: bool,
+) -> None:
+    response = httpx2.Response(
+        status_code=200,
+        json={"info": {"version": published_version}},
+        request=httpx2.Request("GET", "https://pypi.org/pypi/isubrip/json"),
+    )
+    monkeypatch.setattr(httpx2, "get", lambda **_kwargs: response)
+
+    with caplog.at_level(logging.DEBUG, logger=PACKAGE_NAME):
+        check_for_updates(current_package_version="2.7.1")
+
+    assert ("Consider upgrading" in caplog.text) is expect_upgrade_warning
+
+
 def make_itunes_scraper(handler: httpx2.MockTransport | None = None) -> ItunesScraper:
     scraper = object.__new__(ItunesScraper)
     scraper._playlist_filters = None  # noqa: SLF001
@@ -53,6 +89,132 @@ def make_itunes_scraper(handler: httpx2.MockTransport | None = None) -> ItunesSc
 def close_scraper(scraper: HLSScraper) -> None:
     if hasattr(scraper, "_client"):
         asyncio.run(scraper.async_close())
+
+
+@pytest.mark.parametrize("redirect_status", [301, 302, 303, 307, 308])
+def test_itunes_get_data_accepts_standard_relative_redirects(redirect_status: int) -> None:
+    requests: list[str] = []
+    redirected_urls: list[str] = []
+    expected_response = ScrapedMediaResponse(
+        media_data=[],
+        metadata_scraper="appletv",
+        playlist_scraper="itunes",
+        original_data={},
+    )
+
+    class FakeAppleTVScraper:
+        @staticmethod
+        def match_url(url: str) -> bool:
+            redirected_urls.append(url)
+            return True
+
+        @staticmethod
+        async def get_data(url: str) -> ScrapedMediaResponse:
+            redirected_urls.append(url)
+            return expected_response
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(
+            redirect_status,
+            headers={"Location": "/us/movie/test/umc.cmc.12345678901234567890123"},
+            request=request,
+        )
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+    scraper._appletv_scraper = FakeAppleTVScraper()  # type: ignore[assignment]  # noqa: SLF001
+
+    try:
+        response = asyncio.run(
+            scraper.get_data("https://itunes.apple.com/us/movie/test/id1234567890"),
+        )
+    finally:
+        close_scraper(scraper=scraper)
+
+    expected_redirect = "https://tv.apple.com/us/movie/test/umc.cmc.12345678901234567890123"
+    assert response is expected_response
+    assert requests == ["https://tv.apple.com/us/movie/id1234567890"]
+    assert redirected_urls == [expected_redirect, expected_redirect]
+
+
+def test_itunes_get_data_retries_transport_and_server_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    sleep_delays: list[float] = []
+    expected_response = ScrapedMediaResponse(
+        media_data=[],
+        metadata_scraper="appletv",
+        playlist_scraper="itunes",
+        original_data={},
+    )
+
+    class FakeAppleTVScraper:
+        @staticmethod
+        def match_url(url: str) -> bool:  # noqa: ARG004
+            return True
+
+        @staticmethod
+        async def get_data(url: str) -> ScrapedMediaResponse:  # noqa: ARG004
+            return expected_response
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal request_count
+        request_count += 1
+
+        if request_count == 1:
+            raise httpx2.ConnectError("Temporary connection failure.", request=request)
+
+        if request_count == 2:
+            return httpx2.Response(500, request=request)
+
+        return httpx2.Response(
+            301,
+            headers={"Location": "//tv.apple.com/us/movie/test/umc.cmc.12345678901234567890123"},
+            request=request,
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr("isubrip.scrapers.itunes_scraper.asyncio.sleep", fake_sleep)
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+    scraper._appletv_scraper = FakeAppleTVScraper()  # type: ignore[assignment]  # noqa: SLF001
+
+    try:
+        response = asyncio.run(
+            scraper.get_data("https://itunes.apple.com/us/movie/test/id1234567890"),
+        )
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert response is expected_response
+    assert request_count == 3
+    assert sleep_delays == [REDIRECT_SLEEP_TIME, REDIRECT_SLEEP_TIME]
+
+
+def test_itunes_get_data_does_not_retry_a_permanent_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[str] = []
+    sleep_delays: list[float] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(404, request=request)
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr("isubrip.scrapers.itunes_scraper.asyncio.sleep", fake_sleep)
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(ScraperError, match=r"Response code: 404"):
+            asyncio.run(scraper.get_data("https://itunes.apple.com/us/movie/test/id1234567890"))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert requests == ["https://tv.apple.com/us/movie/id1234567890"]
+    assert sleep_delays == []
 
 
 def test_add_or_replace_url_query_param_appends_to_url_without_query() -> None:
@@ -93,6 +255,13 @@ def test_add_or_replace_url_query_param_preserves_existing_query_encoding_and_fr
         key="dsid",
         value="123",
     ) == "https://example.com/playlist.m3u8?opaque=a%2Fb%20c&flag&empty=&dsid=123#part"
+
+
+def test_remove_url_query_param_removes_duplicates_case_insensitively() -> None:
+    assert remove_url_query_param(
+        url="https://example.com/playlist.m3u8?opaque=a%2Fb%20c&DSID=111&flag&dsid=222#part",
+        key="dsid",
+    ) == "https://example.com/playlist.m3u8?opaque=a%2Fb%20c&flag#part"
 
 
 def test_redact_url_query_param_redacts_without_changing_original_url() -> None:
@@ -362,6 +531,100 @@ def test_raise_for_status_omits_response_body_from_logs(caplog: pytest.LogCaptur
     assert "Response body omitted from logs" in caplog.text
 
 
+@pytest.mark.parametrize("required_params_type", ["Default", "WithoutUtsk"])
+def test_appletv_request_params_follow_the_route_advertised_parameter_class(
+    required_params_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scraper = object.__new__(AppleTVScraper)
+    scraper._storefronts_request_params_cache = {}  # noqa: SLF001
+    configuration_data = {
+        "applicationProps": {
+            "requiredParamsMap": {
+                "Default": {"caller": "web", "utsk": "public-token", "v": "100"},
+                "WithoutUtsk": {"caller": "web", "v": "100"},
+            },
+            "routes": {
+                "movieDetail": {
+                    "path": "/uts/v3/movies/{movieId}",
+                    "requiredParamsType": required_params_type,
+                },
+            },
+            "storefront": {
+                "defaultLocale": "en_US",
+                "localesSupported": ["en_US"],
+            },
+        },
+    }
+
+    async def fake_get_configuration_data(storefront_id: str) -> dict:  # noqa: ARG001
+        return configuration_data
+
+    monkeypatch.setattr(scraper, "_get_configuration_data", fake_get_configuration_data)
+    request_params = asyncio.run(
+        scraper._fetch_request_params(  # noqa: SLF001
+            storefront_id="143441",
+            route_path="/uts/v3/movies/{movieId}",
+        ),
+    )
+
+    assert ("utsk" in request_params) is (required_params_type == "Default")
+    assert request_params["sf"] == "143441"
+    assert request_params["locale"] == "en-US"
+
+
+def test_appletv_api_failure_does_not_expose_public_utsk(monkeypatch: pytest.MonkeyPatch) -> None:
+    public_utsk = "public-token-that-must-not-be-logged"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, request=request)
+
+    scraper = object.__new__(AppleTVScraper)
+    scraper._client = httpx2.AsyncClient(  # noqa: SLF001
+        transport=httpx2.MockTransport(handler),
+        headers={"User-Agent": "test"},
+    )
+
+    async def fake_fetch_request_params(**kwargs: Any) -> dict[str, str]:  # noqa: ARG001
+        return {"utsk": public_utsk}
+
+    monkeypatch.setattr(scraper, "_fetch_request_params", fake_fetch_request_params)
+
+    try:
+        with pytest.raises(ScraperError, match=r"Apple TV API request failed \(HTTP 500\)") as exc_info:
+            asyncio.run(scraper._fetch_api_data(storefront_id="143441", endpoint="/movies/test"))  # noqa: SLF001
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert public_utsk not in str(exc_info.value)
+
+
+def test_appletv_transport_failure_does_not_expose_public_utsk(monkeypatch: pytest.MonkeyPatch) -> None:
+    public_utsk = "public-token-that-must-not-be-logged"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError(f"Failed request: {request.url}", request=request)
+
+    scraper = object.__new__(AppleTVScraper)
+    scraper._client = httpx2.AsyncClient(  # noqa: SLF001
+        transport=httpx2.MockTransport(handler),
+        headers={"User-Agent": "test"},
+    )
+
+    async def fake_fetch_request_params(**kwargs: Any) -> dict[str, str]:  # noqa: ARG001
+        return {"utsk": public_utsk}
+
+    monkeypatch.setattr(scraper, "_fetch_request_params", fake_fetch_request_params)
+
+    try:
+        with pytest.raises(ScraperError, match=r"Apple TV API request failed\.") as exc_info:
+            asyncio.run(scraper._fetch_api_data(storefront_id="143441", endpoint="/movies/test"))  # noqa: SLF001
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert public_utsk not in str(exc_info.value)
+
+
 def test_download_media_item_reports_no_matching_subtitles_as_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -387,7 +650,39 @@ def test_download_media_item_reports_no_matching_subtitles_as_failure(
     ) is False
 
 
-def test_appletv_movie_extraction_adds_dsid_to_every_playlist() -> None:
+def test_download_media_item_reports_playlist_failure_alongside_future_rental_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    movie = Movie(
+        name="Test Movie",
+        release_date=2026,
+        preorder_availability_date=dt.datetime(2027, 1, 1),
+        playlist="https://example.com/master.m3u8",
+    )
+
+    async def fake_download_subtitles(**kwargs: Any) -> SubtitlesDownloadResults:  # noqa: ARG001
+        raise PlaylistLoadError("Actionable playlist failure.")
+
+    monkeypatch.setattr("isubrip.commands.download.download_subtitles", fake_download_subtitles)
+
+    with caplog.at_level(logging.INFO, logger=PACKAGE_NAME):
+        result = asyncio.run(
+            download_media_item(
+                scraper=object.__new__(PlaylistTestScraper),
+                media_item=movie,
+                download_path=tmp_path,
+            ),
+        )
+
+    assert result is False
+    assert "available to rent on" in caplog.text
+    assert "currently unavailable" not in caplog.text
+    assert "Actionable playlist failure" in caplog.text
+
+
+def test_appletv_movie_extraction_orders_anonymous_playlists_before_dsid_fallbacks() -> None:
     scraper = object.__new__(AppleTVScraper)
     scraper.config = AppleTVScraper.ScraperConfig(dsid="1234567890")
     playable_data = {
@@ -419,6 +714,8 @@ def test_appletv_movie_extraction_adds_dsid_to_every_playlist() -> None:
     movie = scraper._extract_itunes_movie_data(playable_data=playable_data)  # noqa: SLF001
 
     assert movie.playlist == [
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1&id=2",
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=3&id=4",
         (
             "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8"
             "?cc=US&a=1&id=2&dsid=1234567890"
@@ -471,7 +768,7 @@ def test_appletv_movie_extraction_preserves_playlist_when_entitlement_is_unknown
     assert movie.playlist == ["https://play.itunes.apple.com/playlist.m3u8?cc=US"]
 
 
-def test_appletv_movie_extraction_requires_dsid_before_loading_paid_playlist() -> None:
+def test_appletv_movie_extraction_preserves_paid_playlist_without_runtime_dsid() -> None:
     scraper = object.__new__(AppleTVScraper)
     scraper.config = None
     playable_data = {
@@ -495,24 +792,172 @@ def test_appletv_movie_extraction_requires_dsid_before_loading_paid_playlist() -
         },
     }
 
-    with pytest.raises(ScraperError, match="DSID authentication is required") as exc_info:
-        scraper._extract_itunes_movie_data(playable_data=playable_data)  # noqa: SLF001
+    movie = scraper._extract_itunes_movie_data(playable_data=playable_data)  # noqa: SLF001
 
-    assert "--dsid" in str(exc_info.value)
-    assert "command-line option" in str(exc_info.value)
-    assert "ISUBRIP_DSID" in str(exc_info.value)
-    assert "environment variable" in str(exc_info.value)
-    assert "scrapers.appletv.dsid" in str(exc_info.value)
+    assert movie.playlist == [
+        "https://play-edge.itunes.apple.com/WebObjects/MZPlayLocal.woa/hls/playlist.m3u8?cc=US&a=1",
+    ]
 
 
-def test_itunes_load_playlist_explains_missing_dsid_on_apple_404() -> None:
+def test_appletv_movie_extraction_keeps_dsid_fallback_for_a_future_rental_date() -> None:
+    """A title can be purchasable now while its rental window opens later, so the fallback must survive."""
+    scraper = object.__new__(AppleTVScraper)
+    scraper.config = AppleTVScraper.ScraperConfig(dsid="1234567890")
+    playlist_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1&id=2"
+    playable_data = {
+        "canonicalId": "umc.cmc.test",
+        "isEntitledToPlay": False,
+        "canonicalMetadata": {
+            "movieTitle": "Test Movie",
+            "releaseDate": 1_609_459_200_000,
+        },
+        "itunesMediaApiData": {
+            "id": "123",
+            "futureRentalAvailabilityDate": "2027-01-01",
+            "offers": [{"hlsUrl": playlist_url}],
+        },
+    }
+
+    movie = scraper._extract_itunes_movie_data(playable_data=playable_data)  # noqa: SLF001
+
+    assert movie.playlist == [playlist_url, f"{playlist_url}&dsid=1234567890"]
+    assert movie.preorder_availability_date == dt.datetime(2027, 1, 1)
+
+
+def test_itunes_load_playlist_does_not_send_dsid_when_anonymous_request_succeeds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[str] = []
+    anonymous_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1"
+    dsid_url = f"{anonymous_url}&dsid=1234567890"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(200, text="#EXTM3U\n#EXT-X-VERSION:3\n", request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger=PACKAGE_NAME):
+            playlist = asyncio.run(scraper.load_playlist(url=[anonymous_url, dsid_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert playlist.version == 3
+    assert requests == [anonymous_url]
+    assert "1234567890" not in caplog.text
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+def test_itunes_load_playlist_retries_with_dsid_after_anonymous_access_failure(status_code: int) -> None:
+    requests: list[str] = []
+    anonymous_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1"
+    dsid_url = f"{anonymous_url}&dsid=1234567890"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+
+        if "dsid=" in str(request.url):
+            return httpx2.Response(200, text="#EXTM3U\n#EXT-X-VERSION:3\n", request=request)
+
+        return httpx2.Response(status_code, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        playlist = asyncio.run(scraper.load_playlist(url=[anonymous_url, dsid_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert playlist.version == 3
+    assert requests == [anonymous_url, dsid_url]
+
+
+def test_itunes_load_playlist_tries_all_anonymous_candidates_before_dsid_fallback() -> None:
+    requests: list[str] = []
+    anonymous_urls = [
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1",
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=2",
+    ]
+    dsid_urls = [f"{url}&dsid=1234567890" for url in anonymous_urls]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+
+        if str(request.url) == dsid_urls[0]:
+            return httpx2.Response(200, text="#EXTM3U\n", request=request)
+
+        return httpx2.Response(404, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        asyncio.run(scraper.load_playlist(url=[*anonymous_urls, *dsid_urls]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert requests == [*anonymous_urls, dsid_urls[0]]
+
+
+def test_itunes_load_playlist_does_not_retry_dsid_after_non_entitlement_failure() -> None:
+    requests: list[str] = []
+    anonymous_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1"
+    dsid_url = f"{anonymous_url}&dsid=1234567890"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(500, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError) as exc_info:
+            asyncio.run(scraper.load_playlist(url=[anonymous_url, dsid_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert exc_info.value.status_code == 500
+    assert requests == [anonymous_url]
+
+
+@pytest.mark.parametrize(
+    "anonymous_url",
+    [
+        "https://example.com/playlist.m3u8?cc=US&a=1",
+        (
+            "https://play-edge.itunes.apple.com/WebObjects/MZPlayLocal.woa/hls/subscription/playlist.m3u8"
+            "?cc=US&a=1"
+        ),
+    ],
+)
+def test_itunes_load_playlist_does_not_retry_dsid_for_unsupported_404(anonymous_url: str) -> None:
+    requests: list[str] = []
+    dsid_url = f"{anonymous_url}&dsid=1234567890"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(404, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError) as exc_info:
+            asyncio.run(scraper.load_playlist(url=[anonymous_url, dsid_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert exc_info.value.status_code == 404
+    assert requests == [anonymous_url]
+
+
+def test_itunes_load_playlist_explains_ambiguous_apple_404_without_dsid() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(404, request=request)
 
     scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
 
     try:
-        with pytest.raises(PlaylistLoadError, match="no DSID was included") as exc_info:
+        with pytest.raises(PlaylistLoadError, match="package may be unavailable") as exc_info:
             asyncio.run(
                 scraper.load_playlist(
                     url="https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1",
@@ -521,10 +966,11 @@ def test_itunes_load_playlist_explains_missing_dsid_on_apple_404() -> None:
     finally:
         close_scraper(scraper=scraper)
 
-    assert "active rental" in str(exc_info.value)
+    assert "may require account entitlement" in str(exc_info.value)
+    assert "because no DSID" not in str(exc_info.value)
 
 
-def test_itunes_load_playlist_explains_missing_dsid_on_play_edge_404() -> None:
+def test_itunes_load_playlist_explains_ambiguous_play_edge_404_without_dsid() -> None:
     requests: list[str] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -537,7 +983,7 @@ def test_itunes_load_playlist_explains_missing_dsid_on_play_edge_404() -> None:
     )
 
     try:
-        with pytest.raises(PlaylistLoadError, match="no DSID was included"):
+        with pytest.raises(PlaylistLoadError, match="package may be unavailable"):
             asyncio.run(scraper.load_playlist(url=playlist_url))
     finally:
         close_scraper(scraper=scraper)
@@ -545,27 +991,130 @@ def test_itunes_load_playlist_explains_missing_dsid_on_play_edge_404() -> None:
     assert requests == [playlist_url]
 
 
-def test_itunes_load_playlist_explains_entitlement_failure_when_dsid_is_present() -> None:
+def test_itunes_load_playlist_prefers_the_actionable_error_over_a_trailing_unrelated_failure() -> None:
+    requests: list[str] = []
+    apple_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1"
+    unrelated_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=2"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(404 if str(request.url) == apple_url else 500, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError, match="package may be unavailable") as exc_info:
+            asyncio.run(scraper.load_playlist(url=[apple_url, unrelated_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.url == apple_url
+    assert requests == [apple_url, unrelated_url]
+
+
+def test_itunes_load_playlist_matches_apple_master_paths_case_insensitively() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(404, request=request)
 
     scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
 
     try:
-        with pytest.raises(PlaylistLoadError, match="Apple denied access") as exc_info:
+        with pytest.raises(PlaylistLoadError, match="package may be unavailable"):
             asyncio.run(
                 scraper.load_playlist(
-                    url=(
-                        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8"
-                        "?cc=US&a=1&dsid=1234567890"
-                    ),
+                    url="https://play.itunes.apple.com/WebObjects/mzplay.woa/hls/Playlist.m3u8?cc=US&a=1",
                 ),
             )
     finally:
         close_scraper(scraper=scraper)
 
+
+def test_itunes_load_playlist_explains_failure_after_dsid_fallback() -> None:
+    requests: list[str] = []
+    anonymous_url = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1"
+    dsid_url = f"{anonymous_url}&dsid=1234567890"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(404, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError, match="after retrying with the configured DSID") as exc_info:
+            asyncio.run(scraper.load_playlist(url=[anonymous_url, dsid_url]))
+    finally:
+        close_scraper(scraper=scraper)
+
     assert "1234567890" not in str(exc_info.value)
+    assert "1234567890" not in (exc_info.value.url or "")
+    assert "dsid" not in (exc_info.value.url or "").casefold()
     assert "configured DSID" in str(exc_info.value)
+    assert requests == [anonymous_url, dsid_url]
+
+
+def test_itunes_load_playlist_prefers_actionable_dsid_failure_over_trailing_server_error() -> None:
+    requests: list[str] = []
+    anonymous_urls = [
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=1",
+        "https://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&a=2",
+    ]
+    dsid_urls = [f"{url}&dsid=1234567890" for url in anonymous_urls]
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        request_url = str(request.url)
+        requests.append(request_url)
+
+        if request_url == dsid_urls[0]:
+            return httpx2.Response(403, request=request)
+
+        if request_url == dsid_urls[1]:
+            return httpx2.Response(500, request=request)
+
+        return httpx2.Response(404, request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError, match="after retrying with the configured DSID") as exc_info:
+            asyncio.run(scraper.load_playlist(url=[*anonymous_urls, *dsid_urls]))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.url == anonymous_urls[0]
+    assert "1234567890" not in str(exc_info.value)
+    assert "1234567890" not in (exc_info.value.url or "")
+    assert requests == [*anonymous_urls, *dsid_urls]
+
+
+@pytest.mark.parametrize(
+    "playlist_url",
+    [
+        "http://play.itunes.apple.com/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&dsid=1234567890",
+        "https://play.itunes.apple.com:444/WebObjects/MZPlay.woa/hls/playlist.m3u8?cc=US&dsid=1234567890",
+    ],
+)
+def test_itunes_load_playlist_refuses_dsid_only_insecure_or_unsupported_url(playlist_url: str) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(str(request.url))
+        return httpx2.Response(200, text="#EXTM3U\n", request=request)
+
+    scraper = make_itunes_scraper(handler=httpx2.MockTransport(handler))
+
+    try:
+        with pytest.raises(PlaylistLoadError, match="Refusing to send an Apple DSID") as exc_info:
+            asyncio.run(scraper.load_playlist(url=playlist_url))
+    finally:
+        close_scraper(scraper=scraper)
+
+    assert requests == []
+    assert "1234567890" not in str(exc_info.value)
+    assert exc_info.value.url is not None
+    assert "dsid" not in exc_info.value.url.casefold()
 
 
 def test_itunes_load_playlist_recognizes_case_insensitive_dsid_key() -> None:
@@ -587,4 +1136,4 @@ def test_itunes_load_playlist_recognizes_case_insensitive_dsid_key() -> None:
     finally:
         close_scraper(scraper=scraper)
 
-    assert "no DSID was included" not in str(exc_info.value)
+    assert "because no DSID" not in str(exc_info.value)

@@ -9,6 +9,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import httpx2
+from packaging.version import Version
 from pydantic import ValidationError
 
 from isubrip.cli import console
@@ -153,7 +154,7 @@ def parse_cli_args(args: Sequence[str] | None = None) -> CLIArguments:
     parser.add_argument(
         "--dsid",
         metavar="DSID",
-        help="Apple account DSID to use for this run.",
+        help="Optional Apple account DSID fallback to use for owned or rented movies.",
     )
     parser.add_argument(
         "urls",
@@ -196,10 +197,16 @@ def check_for_updates(current_package_version: str) -> None:
 
         pypi_latest_version = response_data["info"]["version"]
 
-        if pypi_latest_version != current_package_version:
+        if Version(pypi_latest_version) > Version(current_package_version):
             logger.warning(f"You are currently using version '{current_package_version}' of '{PACKAGE_NAME}', "
                            f"however version '{pypi_latest_version}' is available."
                            f'\nConsider upgrading by running "pip install --upgrade {PACKAGE_NAME}"')
+
+        elif Version(pypi_latest_version) < Version(current_package_version):
+            logger.debug(
+                f"Installed version of '{PACKAGE_NAME}' ({current_package_version}) is newer than the latest "
+                f"published version ({pypi_latest_version}).",
+            )
 
         else:
             logger.debug(f"Latest version of '{PACKAGE_NAME}' ({current_package_version}) is currently installed.")
